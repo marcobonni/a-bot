@@ -1,6 +1,5 @@
 const {
   ActionRowBuilder,
-  ChannelType,
   Client,
   GatewayIntentBits,
   PermissionFlagsBits,
@@ -9,8 +8,17 @@ const {
   SlashCommandBuilder,
   StringSelectMenuBuilder,
 } = require("discord.js");
-const fs = require("fs");
-const path = require("path");
+const { startTwitchMonitor } = require("./twitch");
+const {
+  ensureRankDataFile,
+  loadRankLinks,
+  saveRankLinks,
+  fetchPlayerProfile,
+  searchPlayers,
+  syncMemberRoles,
+  syncOnlyVoiceUsers,
+  formatSnapshot,
+} = require("./rank");
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -22,30 +30,8 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   );
 }
 
-const DATA_FILE = path.join(__dirname, "links.json");
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SEARCH_MENU_PREFIX = "select_player:";
-
-const SOLO_ROLE_MAP = {
-  bronze: process.env.ROLE_SOLO_BRONZE,
-  silver: process.env.ROLE_SOLO_SILVER,
-  gold: process.env.ROLE_SOLO_GOLD,
-  platinum: process.env.ROLE_SOLO_PLATINUM,
-  diamond: process.env.ROLE_SOLO_DIAMOND,
-  conqueror: process.env.ROLE_SOLO_CONQUEROR,
-};
-
-const TEAM_ROLE_MAP = {
-  bronze: process.env.ROLE_TEAM_BRONZE,
-  silver: process.env.ROLE_TEAM_SILVER,
-  gold: process.env.ROLE_TEAM_GOLD,
-  platinum: process.env.ROLE_TEAM_PLATINUM,
-  diamond: process.env.ROLE_TEAM_DIAMOND,
-  conqueror: process.env.ROLE_TEAM_CONQUEROR,
-};
-
-const SOLO_ROLE_IDS = Object.values(SOLO_ROLE_MAP).filter(Boolean);
-const TEAM_ROLE_IDS = Object.values(TEAM_ROLE_MAP).filter(Boolean);
 
 const client = new Client({
   intents: [
@@ -54,212 +40,6 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
-
-function ensureDataFile() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2), "utf8");
-  }
-}
-
-function loadLinks() {
-  ensureDataFile();
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-}
-
-function saveLinks(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-function normalizeRankLevel(rankLevel) {
-  if (!rankLevel) return null;
-
-  const value = String(rankLevel).trim().toLowerCase();
-
-  if (value.includes("conqueror")) return "conqueror";
-  if (value.includes("diamond")) return "diamond";
-  if (value.includes("platinum")) return "platinum";
-  if (value.includes("gold")) return "gold";
-  if (value.includes("silver")) return "silver";
-  if (value.includes("bronze")) return "bronze";
-
-  return null;
-}
-
-async function fetchJson(url, errorPrefix) {
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    throw new Error(`${errorPrefix}: ${response.status}`);
-  }
-
-  return response.json();
-}
-
-async function fetchPlayerProfile(profileId) {
-  const url = `https://aoe4world.com/api/v0/players/${encodeURIComponent(profileId)}`;
-  return fetchJson(url, "Errore recupero profilo AoE4World");
-}
-
-async function searchPlayers(query) {
-  const url = `https://aoe4world.com/api/v0/players/search?query=${encodeURIComponent(query)}`;
-  const data = await fetchJson(url, "Errore ricerca giocatori AoE4World");
-
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.players)) return data.players;
-  if (Array.isArray(data?.items)) return data.items;
-
-  return [];
-}
-
-async function fetchLeaderboardEntry(leaderboard, profileId) {
-  const url = `https://aoe4world.com/api/v0/leaderboards/${leaderboard}?profile_id=${encodeURIComponent(profileId)}`;
-  const data = await fetchJson(url, `Errore leaderboard ${leaderboard}`);
-
-  if (Array.isArray(data)) {
-    return data[0] || null;
-  }
-
-  if (Array.isArray(data?.players)) {
-    return data.players[0] || null;
-  }
-
-  if (Array.isArray(data?.leaderboard)) {
-    return data.leaderboard[0] || null;
-  }
-
-  if (Array.isArray(data?.entries)) {
-    return data.entries[0] || null;
-  }
-
-  if (Array.isArray(data?.items)) {
-    return data.items[0] || null;
-  }
-
-  if (data?.profile_id || data?.rank_level || data?.rating) {
-    return data;
-  }
-
-  return null;
-}
-
-async function getRankSnapshot(profileId) {
-  const [soloEntry, teamEntry] = await Promise.all([
-    fetchLeaderboardEntry("rm_solo", profileId),
-    fetchLeaderboardEntry("rm_team", profileId),
-  ]);
-
-  return {
-    solo: {
-      rank: normalizeRankLevel(soloEntry?.rank_level),
-      rating: soloEntry?.rating ?? null,
-      raw: soloEntry ?? null,
-    },
-    team: {
-      rank: normalizeRankLevel(teamEntry?.rank_level),
-      rating: teamEntry?.rating ?? null,
-      raw: teamEntry ?? null,
-    },
-  };
-}
-
-async function removeRankFamily(member, roleIdsToRemove, roleIdToKeep = null) {
-  const toRemove = roleIdsToRemove.filter(
-    (roleId) => roleId && roleId !== roleIdToKeep && member.roles.cache.has(roleId)
-  );
-
-  if (toRemove.length > 0) {
-    await member.roles.remove(toRemove, "Aggiornamento automatico rank AoE4");
-  }
-}
-
-async function ensureRankRole(member, roleId) {
-  if (!roleId) return;
-  if (!member.roles.cache.has(roleId)) {
-    await member.roles.add(roleId, "Aggiornamento automatico rank AoE4");
-  }
-}
-
-async function syncMemberRoles(guild, discordUserId, linkEntry) {
-  const member = await guild.members.fetch(discordUserId);
-  const snapshot = await getRankSnapshot(linkEntry.profileId);
-
-  const soloRoleId = snapshot.solo.rank ? SOLO_ROLE_MAP[snapshot.solo.rank] : null;
-  const teamRoleId = snapshot.team.rank ? TEAM_ROLE_MAP[snapshot.team.rank] : null;
-
-  await removeRankFamily(member, SOLO_ROLE_IDS, soloRoleId);
-  await removeRankFamily(member, TEAM_ROLE_IDS, teamRoleId);
-
-  if (soloRoleId) {
-    await ensureRankRole(member, soloRoleId);
-  }
-
-  if (teamRoleId) {
-    await ensureRankRole(member, teamRoleId);
-  }
-
-  return snapshot;
-}
-
-function getVoiceMemberIds(guild) {
-  const ids = new Set();
-
-  for (const [, channel] of guild.channels.cache) {
-    if (
-      channel.type === ChannelType.GuildVoice ||
-      channel.type === ChannelType.GuildStageVoice
-    ) {
-      for (const [memberId] of channel.members) {
-        ids.add(memberId);
-      }
-    }
-  }
-
-  return ids;
-}
-
-async function syncOnlyVoiceUsers(guild) {
-  await guild.channels.fetch();
-  await guild.members.fetch();
-
-  const links = loadLinks();
-  const voiceMemberIds = getVoiceMemberIds(guild);
-
-  let processed = 0;
-  let updated = 0;
-  let skipped = 0;
-  let errors = 0;
-
-  for (const memberId of voiceMemberIds) {
-    processed += 1;
-
-    const linkEntry = links[memberId];
-    if (!linkEntry?.profileId) {
-      skipped += 1;
-      continue;
-    }
-
-    try {
-      await syncMemberRoles(guild, memberId, linkEntry);
-      updated += 1;
-    } catch (error) {
-      errors += 1;
-      console.error(`Errore sync utente ${memberId}:`, error.message);
-    }
-  }
-
-  return { processed, updated, skipped, errors };
-}
-
-function formatSnapshot(snapshot) {
-  return [
-    `Solo: **${snapshot.solo.rank || "non classificato"}**${
-      snapshot.solo.rating ? ` (${snapshot.solo.rating})` : ""
-    }`,
-    `Team: **${snapshot.team.rank || "non classificato"}**${
-      snapshot.team.rating ? ` (${snapshot.team.rating})` : ""
-    }`,
-  ].join("\n");
-}
 
 async function registerCommands() {
   const commands = [
@@ -308,20 +88,24 @@ client.once("ready", async () => {
   console.log(`Bot online come ${client.user.tag}`);
 
   try {
+    ensureRankDataFile();
+
     const guild = await client.guilds.fetch(GUILD_ID);
     const fullGuild = await guild.fetch();
 
-    const result = await syncOnlyVoiceUsers(fullGuild);
+    const result = await syncOnlyVoiceUsers(client, fullGuild);
     console.log("Sync iniziale completato:", result);
 
     setInterval(async () => {
       try {
-        const hourlyResult = await syncOnlyVoiceUsers(fullGuild);
+        const hourlyResult = await syncOnlyVoiceUsers(client, fullGuild);
         console.log("Sync orario completato:", hourlyResult);
       } catch (error) {
         console.error("Errore sync orario:", error);
       }
     }, SYNC_INTERVAL_MS);
+
+    startTwitchMonitor(client);
   } catch (error) {
     console.error("Errore nel bootstrap del bot:", error);
   }
@@ -347,15 +131,18 @@ client.on("interactionCreate", async (interaction) => {
       const profileId = interaction.values[0];
       const player = await fetchPlayerProfile(profileId);
 
-      const links = loadLinks();
+      const links = loadRankLinks();
       links[interaction.user.id] = {
         profileId: String(profileId),
         playerName: player?.name || null,
         linkedAt: new Date().toISOString(),
+        lastSoloRank: null,
+        lastTeamRank: null,
       };
-      saveLinks(links);
+      saveRankLinks(links);
 
       const snapshot = await syncMemberRoles(
+        client,
         interaction.guild,
         interaction.user.id,
         links[interaction.user.id]
@@ -381,15 +168,18 @@ client.on("interactionCreate", async (interaction) => {
       const profileId = interaction.options.getString("profile_id", true).trim();
       const player = await fetchPlayerProfile(profileId);
 
-      const links = loadLinks();
+      const links = loadRankLinks();
       links[interaction.user.id] = {
         profileId,
         playerName: player?.name || null,
         linkedAt: new Date().toISOString(),
+        lastSoloRank: null,
+        lastTeamRank: null,
       };
-      saveLinks(links);
+      saveRankLinks(links);
 
       const snapshot = await syncMemberRoles(
+        client,
         interaction.guild,
         interaction.user.id,
         links[interaction.user.id]
@@ -425,15 +215,18 @@ client.on("interactionCreate", async (interaction) => {
 
         const playerProfile = await fetchPlayerProfile(profileId);
 
-        const links = loadLinks();
+        const links = loadRankLinks();
         links[interaction.user.id] = {
           profileId,
           playerName: playerProfile?.name || player?.name || null,
           linkedAt: new Date().toISOString(),
+          lastSoloRank: null,
+          lastTeamRank: null,
         };
-        saveLinks(links);
+        saveRankLinks(links);
 
         const snapshot = await syncMemberRoles(
+          client,
           interaction.guild,
           interaction.user.id,
           links[interaction.user.id]
@@ -484,7 +277,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.commandName === "unlink") {
-      const links = loadLinks();
+      const links = loadRankLinks();
       const entry = links[interaction.user.id];
 
       if (!entry) {
@@ -496,11 +289,14 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       delete links[interaction.user.id];
-      saveLinks(links);
+      saveRankLinks(links);
 
-      const member = await interaction.guild.members.fetch(interaction.user.id);
-      await removeRankFamily(member, SOLO_ROLE_IDS, null);
-      await removeRankFamily(member, TEAM_ROLE_IDS, null);
+      await syncMemberRoles(client, interaction.guild, interaction.user.id, {
+        profileId: null,
+        lastSoloRank: null,
+        lastTeamRank: null,
+        clearOnly: true,
+      });
 
       await interaction.reply({
         content: "Profilo scollegato e ruoli rank rimossi.",
@@ -512,7 +308,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.commandName === "syncme") {
       await interaction.deferReply({ ephemeral: true });
 
-      const links = loadLinks();
+      const links = loadRankLinks();
       const entry = links[interaction.user.id];
 
       if (!entry) {
@@ -520,7 +316,7 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
-      const snapshot = await syncMemberRoles(interaction.guild, interaction.user.id, entry);
+      const snapshot = await syncMemberRoles(client, interaction.guild, interaction.user.id, entry);
 
       await interaction.editReply(
         [`Ruoli aggiornati.`, formatSnapshot(snapshot)].join("\n")
@@ -531,7 +327,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.commandName === "syncvoice") {
       await interaction.deferReply({ ephemeral: true });
 
-      const result = await syncOnlyVoiceUsers(interaction.guild);
+      const result = await syncOnlyVoiceUsers(client, interaction.guild);
 
       await interaction.editReply(
         [
@@ -544,7 +340,10 @@ client.on("interactionCreate", async (interaction) => {
       );
     }
   } catch (error) {
-    console.error("Errore interaction:", error);
+    console.error("Errore interaction completo:", error);
+    console.error("Codice errore:", error.code);
+    console.error("Messaggio errore:", error.message);
+    console.error("Stack:", error.stack);
 
     const message = `Errore: ${error.message}`;
 

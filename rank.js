@@ -1,0 +1,416 @@
+const { ChannelType, EmbedBuilder } = require("discord.js");
+const fs = require("fs");
+const path = require("path");
+
+const DATA_FILE = path.join(__dirname, "links.json");
+
+const SOLO_ROLE_MAP = {
+  bronze: process.env.ROLE_SOLO_BRONZE,
+  silver: process.env.ROLE_SOLO_SILVER,
+  gold: process.env.ROLE_SOLO_GOLD,
+  platinum: process.env.ROLE_SOLO_PLATINUM,
+  diamond: process.env.ROLE_SOLO_DIAMOND,
+  conqueror: process.env.ROLE_SOLO_CONQUEROR,
+};
+
+const TEAM_ROLE_MAP = {
+  bronze: process.env.ROLE_TEAM_BRONZE,
+  silver: process.env.ROLE_TEAM_SILVER,
+  gold: process.env.ROLE_TEAM_GOLD,
+  platinum: process.env.ROLE_TEAM_PLATINUM,
+  diamond: process.env.ROLE_TEAM_DIAMOND,
+  conqueror: process.env.ROLE_TEAM_CONQUEROR,
+};
+
+const SOLO_ROLE_IDS = Object.values(SOLO_ROLE_MAP).filter(Boolean);
+const TEAM_ROLE_IDS = Object.values(TEAM_ROLE_MAP).filter(Boolean);
+
+function ensureRankDataFile() {
+  if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2), "utf8");
+  }
+}
+
+function loadRankLinks() {
+  ensureRankDataFile();
+  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+}
+
+function saveRankLinks(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
+}
+
+function normalizeRankLevel(rankLevel) {
+  if (!rankLevel) return null;
+
+  const value = String(rankLevel).trim().toLowerCase();
+
+  if (value.includes("conqueror")) return "conqueror";
+  if (value.includes("diamond")) return "diamond";
+  if (value.includes("platinum")) return "platinum";
+  if (value.includes("gold")) return "gold";
+  if (value.includes("silver")) return "silver";
+  if (value.includes("bronze")) return "bronze";
+
+  return null;
+}
+
+async function fetchJson(url, errorPrefix, options = {}) {
+  const response = await fetch(url, options);
+
+  if (!response.ok) {
+    throw new Error(`${errorPrefix}: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function fetchPlayerProfile(profileId) {
+  const url = `https://aoe4world.com/api/v0/players/${encodeURIComponent(profileId)}`;
+  return fetchJson(url, "Errore recupero profilo AoE4World");
+}
+
+async function searchPlayers(query) {
+  const url = `https://aoe4world.com/api/v0/players/search?query=${encodeURIComponent(query)}`;
+  const data = await fetchJson(url, "Errore ricerca giocatori AoE4World");
+
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.players)) return data.players;
+  if (Array.isArray(data?.items)) return data.items;
+
+  return [];
+}
+
+async function fetchLeaderboardEntry(leaderboard, profileId) {
+  const url = `https://aoe4world.com/api/v0/leaderboards/${leaderboard}?profile_id=${encodeURIComponent(profileId)}`;
+  const data = await fetchJson(url, `Errore leaderboard ${leaderboard}`);
+
+  if (Array.isArray(data)) {
+    return data[0] || null;
+  }
+
+  if (Array.isArray(data?.players)) {
+    return data.players[0] || null;
+  }
+
+  if (Array.isArray(data?.leaderboard)) {
+    return data.leaderboard[0] || null;
+  }
+
+  if (Array.isArray(data?.entries)) {
+    return data.entries[0] || null;
+  }
+
+  if (Array.isArray(data?.items)) {
+    return data.items[0] || null;
+  }
+
+  if (data?.profile_id || data?.rank_level || data?.rating) {
+    return data;
+  }
+
+  return null;
+}
+
+async function getRankSnapshot(profileId) {
+  const [soloEntry, teamEntry] = await Promise.all([
+    fetchLeaderboardEntry("rm_solo", profileId),
+    fetchLeaderboardEntry("rm_team", profileId),
+  ]);
+
+  return {
+    solo: {
+      rank: normalizeRankLevel(soloEntry?.rank_level),
+      rating: soloEntry?.rating ?? null,
+      raw: soloEntry ?? null,
+    },
+    team: {
+      rank: normalizeRankLevel(teamEntry?.rank_level),
+      rating: teamEntry?.rating ?? null,
+      raw: teamEntry ?? null,
+    },
+  };
+}
+
+function getRankValue(rank) {
+  const rankOrder = {
+    bronze: 1,
+    silver: 2,
+    gold: 3,
+    platinum: 4,
+    diamond: 5,
+    conqueror: 6,
+  };
+
+  return rankOrder[rank] || 0;
+}
+
+function getRankEmoji(rank) {
+  const emojiMap = {
+    bronze: "🟤",
+    silver: "⚪",
+    gold: "🟡",
+    platinum: "🔷",
+    diamond: "💎",
+    conqueror: "👑",
+  };
+
+  return emojiMap[rank] || "🏆";
+}
+
+function formatRankLabel(rank) {
+  if (!rank) return "Non classificato";
+  return rank.charAt(0).toUpperCase() + rank.slice(1);
+}
+
+function formatSnapshot(snapshot) {
+  return [
+    `Solo: **${snapshot.solo.rank || "non classificato"}**${
+      snapshot.solo.rating ? ` (${snapshot.solo.rating})` : ""
+    }`,
+    `Team: **${snapshot.team.rank || "non classificato"}**${
+      snapshot.team.rating ? ` (${snapshot.team.rating})` : ""
+    }`,
+  ].join("\n");
+}
+
+async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) {
+  const channelId = process.env.DISCORD_RANK_CHANNEL_ID;
+  if (!channelId) return;
+
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || typeof channel.send !== "function") return;
+
+  const member = await guild.members.fetch(userId);
+  const emoji = getRankEmoji(newRank);
+  const modeLabel = type === "solo" ? "Ranked Solo" : "Ranked Team";
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${emoji} Nuovo rank raggiunto`)
+    .setDescription(`${member} ha raggiunto un nuovo rango in **${modeLabel}**.`)
+    .addFields(
+      {
+        name: "Giocatore",
+        value: member.user.username,
+        inline: true,
+      },
+      {
+        name: "Da",
+        value: `${getRankEmoji(oldRank)} ${formatRankLabel(oldRank)}`,
+        inline: true,
+      },
+      {
+        name: "A",
+        value: `${getRankEmoji(newRank)} ${formatRankLabel(newRank)}`,
+        inline: true,
+      }
+    )
+    .setFooter({
+      text: "Age of Empires IV Rank Update",
+    })
+    .setTimestamp();
+
+  await channel.send({ embeds: [embed] });
+}
+
+async function handleRankUpNotifications(client, guild, discordUserId, oldSolo, newSolo, oldTeam, newTeam) {
+  const soloIncreased =
+    getRankValue(newSolo) > getRankValue(oldSolo) &&
+    oldSolo &&
+    newSolo &&
+    oldSolo !== newSolo;
+
+  const teamIncreased =
+    getRankValue(newTeam) > getRankValue(oldTeam) &&
+    oldTeam &&
+    newTeam &&
+    oldTeam !== newTeam;
+
+  if (soloIncreased) {
+    await sendRankUpMessage(client, guild, discordUserId, "solo", oldSolo, newSolo);
+  }
+
+  if (teamIncreased) {
+    await sendRankUpMessage(client, guild, discordUserId, "team", oldTeam, newTeam);
+  }
+}
+
+async function removeRankFamily(member, roleIdsToRemove, roleIdToKeep = null) {
+  const botMember = await member.guild.members.fetchMe();
+
+  const toRemove = [];
+
+  for (const roleId of roleIdsToRemove) {
+    if (!roleId || roleId === roleIdToKeep || !member.roles.cache.has(roleId)) {
+      continue;
+    }
+
+    const role = member.guild.roles.cache.get(roleId);
+    if (!role) {
+      console.log(`Ruolo da rimuovere non trovato: ${roleId}`);
+      continue;
+    }
+
+    if (role.managed) {
+      console.log(`Non posso rimuovere il ruolo ${role.name}: è gestito da integrazione.`);
+      continue;
+    }
+
+    if (role.position >= botMember.roles.highest.position) {
+      console.log(
+        `Non posso rimuovere il ruolo ${role.name}: è sopra o uguale al mio ruolo più alto (${botMember.roles.highest.name}).`
+      );
+      continue;
+    }
+
+    toRemove.push(roleId);
+  }
+
+  if (toRemove.length > 0) {
+    await member.roles.remove(toRemove, "Aggiornamento automatico rank AoE4");
+  }
+}
+
+async function ensureRankRole(member, roleId) {
+  if (!roleId) return;
+
+  const role = member.guild.roles.cache.get(roleId);
+  if (!role) {
+    throw new Error(`Ruolo non trovato: ${roleId}`);
+  }
+
+  const botMember = await member.guild.members.fetchMe();
+
+  if (role.managed) {
+    throw new Error(`Il ruolo "${role.name}" è gestito da un'integrazione e non posso assegnarlo.`);
+  }
+
+  if (role.position >= botMember.roles.highest.position) {
+    throw new Error(
+      `Non posso assegnare il ruolo "${role.name}" perché è sopra o uguale al mio ruolo più alto ("${botMember.roles.highest.name}").`
+    );
+  }
+
+  if (!member.roles.cache.has(roleId)) {
+    await member.roles.add(roleId, "Aggiornamento automatico rank AoE4");
+  }
+}
+
+async function clearRankRoles(guild, discordUserId) {
+  const member = await guild.members.fetch(discordUserId);
+  await removeRankFamily(member, SOLO_ROLE_IDS, null);
+  await removeRankFamily(member, TEAM_ROLE_IDS, null);
+}
+
+async function syncMemberRoles(client, guild, discordUserId, linkEntry) {
+  if (linkEntry?.clearOnly) {
+    await clearRankRoles(guild, discordUserId);
+    return {
+      solo: { rank: null, rating: null },
+      team: { rank: null, rating: null },
+    };
+  }
+
+  const member = await guild.members.fetch(discordUserId);
+  const snapshot = await getRankSnapshot(linkEntry.profileId);
+
+  const oldSolo = linkEntry.lastSoloRank || null;
+  const oldTeam = linkEntry.lastTeamRank || null;
+
+  const newSolo = snapshot.solo.rank || null;
+  const newTeam = snapshot.team.rank || null;
+
+  const soloRoleId = newSolo ? SOLO_ROLE_MAP[newSolo] : null;
+  const teamRoleId = newTeam ? TEAM_ROLE_MAP[newTeam] : null;
+
+  await removeRankFamily(member, SOLO_ROLE_IDS, soloRoleId);
+  await removeRankFamily(member, TEAM_ROLE_IDS, teamRoleId);
+
+  if (soloRoleId) {
+    await ensureRankRole(member, soloRoleId);
+  }
+
+  if (teamRoleId) {
+    await ensureRankRole(member, teamRoleId);
+  }
+
+  await handleRankUpNotifications(
+    client,
+    guild,
+    discordUserId,
+    oldSolo,
+    newSolo,
+    oldTeam,
+    newTeam
+  );
+
+  const links = loadRankLinks();
+  if (links[discordUserId]) {
+    links[discordUserId].lastSoloRank = newSolo;
+    links[discordUserId].lastTeamRank = newTeam;
+    saveRankLinks(links);
+  }
+
+  return snapshot;
+}
+
+function getVoiceMemberIds(guild) {
+  const ids = new Set();
+
+  for (const [, channel] of guild.channels.cache) {
+    if (
+      channel.type === ChannelType.GuildVoice ||
+      channel.type === ChannelType.GuildStageVoice
+    ) {
+      for (const [memberId] of channel.members) {
+        ids.add(memberId);
+      }
+    }
+  }
+
+  return ids;
+}
+
+async function syncOnlyVoiceUsers(client, guild) {
+  await guild.channels.fetch();
+  await guild.members.fetch();
+
+  const links = loadRankLinks();
+  const voiceMemberIds = getVoiceMemberIds(guild);
+
+  let processed = 0;
+  let updated = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const memberId of voiceMemberIds) {
+    processed += 1;
+
+    const linkEntry = links[memberId];
+    if (!linkEntry?.profileId) {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      await syncMemberRoles(client, guild, memberId, linkEntry);
+      updated += 1;
+    } catch (error) {
+      errors += 1;
+      console.error(`Errore sync utente ${memberId}:`, error.message);
+    }
+  }
+
+  return { processed, updated, skipped, errors };
+}
+
+module.exports = {
+  ensureRankDataFile,
+  loadRankLinks,
+  saveRankLinks,
+  fetchPlayerProfile,
+  searchPlayers,
+  syncMemberRoles,
+  syncOnlyVoiceUsers,
+  formatSnapshot,
+};
