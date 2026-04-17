@@ -364,3 +364,8 @@ registerCommands()
   .catch((error) => {
     console.error("Errore avvio bot:", error);
   });
+
+  
+  require("http")
+  .createServer((req, res) => res.end("ok"))
+  .listen(process.env.PORT || 3000);
