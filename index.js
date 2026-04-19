@@ -1,472 +1,408 @@
-const http = require("http");
+const {
+  ActionRowBuilder,
+  Client,
+  GatewayIntentBits,
+  PermissionFlagsBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  StringSelectMenuBuilder,
+} = require("discord.js");
+const { startTwitchMonitor } = require("./twitch");
+const { startQueueChannelWebhookServer } = require("./queueChannelSync");
+const {
+  ensureRankDataFile,
+  loadRankLinks,
+  saveRankLinks,
+  fetchPlayerProfile,
+  searchPlayers,
+  syncMemberRoles,
+  syncOnlyVoiceUsers,
+  formatSnapshot,
+} = require("./rank");
 
-const PORT = Number(process.env.PORT || 3000);
-const RAW_WEBHOOK_PATH = process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook";
-const NEATQUEUE_WEBHOOK_TOKEN = process.env.NEATQUEUE_WEBHOOK_TOKEN || "";
+const TOKEN = process.env.DISCORD_BOT_TOKEN;
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
-const QUEUE_STATUS_CHANNEL_ID = process.env.QUEUE_STATUS_CHANNEL_ID || "";
-const QUEUE_CHANNEL_NAME_PREFIX =
-  process.env.QUEUE_CHANNEL_NAME_PREFIX || "giocatori-in-coda";
-
-const QUEUE_VOICE_CHANNEL_ID = process.env.QUEUE_VOICE_CHANNEL_ID || "";
-const QUEUE_VOICE_IDLE_NAME = process.env.QUEUE_VOICE_IDLE_NAME || "zozza-disponibile";
-const QUEUE_VOICE_ACTIVE_NAME = process.env.QUEUE_VOICE_ACTIVE_NAME || "zozza-in-corso";
-
-const NEATQUEUE_QUEUE_NAME = process.env.NEATQUEUE_QUEUE_NAME || "";
-const RENAME_DEBOUNCE_MS = Number(process.env.RENAME_DEBOUNCE_MS || 5000);
-
-let started = false;
-let renameTimer = null;
-let pendingCount = null;
-let lastAppliedCount = null;
-let matchInProgress = false;
-
-function normalizePath(path) {
-  const value = String(path || "").trim();
-  if (!value) return "/";
-  const withLeadingSlash = value.startsWith("/") ? value : `/${value}`;
-  return withLeadingSlash.replace(/\/+$/, "") || "/";
-}
-
-const NEATQUEUE_WEBHOOK_PATH = normalizePath(RAW_WEBHOOK_PATH);
-
-function sanitizeTextChannelName(value) {
-  return String(value)
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9\-_]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 100);
-}
-
-function buildChannelName(count) {
-  return sanitizeTextChannelName(`${QUEUE_CHANNEL_NAME_PREFIX}-${count}`);
-}
-
-function normalizeQueueName(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function normalizeActionName(action) {
-  return String(action || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[\s-]/g, "_");
-}
-
-function shouldHandleQueue(payload) {
-  if (!NEATQUEUE_QUEUE_NAME) {
-    console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME non configurato: accetto tutti gli eventi.");
-    return true;
-  }
-
-  const payloadQueueCandidates = [
-    payload?.queue,
-    payload?.queueName,
-    payload?.queue_name,
-    payload?.name,
-    payload?.data?.queue,
-    payload?.data?.queueName,
-    payload?.data?.queue_name,
-    payload?.queue?.name,
-  ]
-    .map(normalizeQueueName)
-    .filter(Boolean);
-
-  const wantedQueue = normalizeQueueName(NEATQUEUE_QUEUE_NAME);
-  const match = payloadQueueCandidates.includes(wantedQueue);
-
-  console.log("[queueChannelSync] Queue configurata:", wantedQueue);
-  console.log("[queueChannelSync] Queue trovate nel payload:", payloadQueueCandidates);
-  console.log("[queueChannelSync] Match queue:", match);
-
-  return match;
-}
-
-function extractPlayersArray(payload) {
-  const candidates = [
-    payload?.players,
-    payload?.queue?.players,
-    payload?.data?.players,
-    payload?.data?.queue?.players,
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate;
-    }
-  }
-
-  return [];
-}
-
-function extractAction(payload) {
-  const candidates = [
-    payload?.action,
-    payload?.event,
-    payload?.type,
-    payload?.name,
-    payload?.data?.action,
-    payload?.data?.event,
-    payload?.data?.type,
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate) {
-      return String(candidate).toUpperCase();
-    }
-  }
-
-  return "";
-}
-
-function isClearQueueAction(action) {
-  const normalized = normalizeActionName(action);
-  return normalized === "CLEARQUEUE" || normalized === "CLEAR_QUEUE";
-}
-
-function isMatchActiveAction(action) {
-  const normalized = normalizeActionName(action);
-  return (
-    normalized === "MATCH_STARTED" ||
-    normalized === "TEAMS_CREATED" ||
-    normalized === "MATCH_CREATED" ||
-    normalized === "GAME_STARTED"
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  throw new Error(
+    "Mancano DISCORD_BOT_TOKEN, DISCORD_CLIENT_ID o DISCORD_GUILD_ID nelle variabili ambiente."
   );
 }
 
-function isMatchIdleAction(action) {
-  const normalized = normalizeActionName(action);
-  return (
-    normalized === "MATCH_COMPLETED" ||
-    normalized === "MATCH_CANCELLED" ||
-    normalized === "MATCH_ENDED" ||
-    normalized === "GAME_ENDED"
+const SYNC_INTERVAL_MS = 60 * 60 * 1000;
+const SEARCH_MENU_PREFIX = "select_player:";
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+});
+
+async function registerCommands() {
+  console.log("[index] Registrazione comandi slash...");
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("link")
+      .setDescription("Collega il tuo profilo AoE4 tramite profile ID")
+      .addStringOption((option) =>
+        option
+          .setName("profile_id")
+          .setDescription("Il tuo profile ID AoE4World")
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("linkname")
+      .setDescription("Collega il tuo profilo AoE4 usando il nome Steam/AoE4")
+      .addStringOption((option) =>
+        option
+          .setName("name")
+          .setDescription("Nome Steam o nome giocatore")
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("unlink")
+      .setDescription("Scollega il tuo profilo AoE4World"),
+
+    new SlashCommandBuilder()
+      .setName("syncme")
+      .setDescription("Aggiorna subito i tuoi ruoli AoE4"),
+
+    new SlashCommandBuilder()
+      .setName("syncvoice")
+      .setDescription("Aggiorna i ruoli AoE4 degli utenti attualmente in vocale")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+  ].map((command) => command.toJSON());
+
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+    body: commands,
+  });
+
+  console.log("[index] Comandi slash registrati con successo");
+}
+
+client.once("ready", async () => {
+  console.log(`[index] Bot online come ${client.user.tag}`);
+  console.log("[index] Variabili principali:");
+  console.log("[index] GUILD_ID:", GUILD_ID);
+  console.log("[index] CLIENT_ID:", CLIENT_ID);
+  console.log("[index] PORT:", process.env.PORT || 3000);
+  console.log(
+    "[index] NEATQUEUE_WEBHOOK_PATH:",
+    process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook"
   );
-}
-
-function extractCount(payload, action) {
-  const players = extractPlayersArray(payload);
-
-  if (players.length > 0) {
-    return players.length;
-  }
-
-  const numericCandidates = [
-    payload?.count,
-    payload?.playerCount,
-    payload?.player_count,
-    payload?.queueCount,
-    payload?.queue_count,
-    payload?.data?.count,
-    payload?.data?.playerCount,
-    payload?.data?.player_count,
-    payload?.data?.queueCount,
-    payload?.data?.queue_count,
-  ];
-
-  for (const candidate of numericCandidates) {
-    const numericValue = Number(candidate);
-    if (Number.isFinite(numericValue) && numericValue >= 0) {
-      return numericValue;
-    }
-  }
-
-  if (isClearQueueAction(action)) {
-    console.log("[queueChannelSync] Evento clear queue rilevato: imposto count a 0");
-    return 0;
-  }
-
-  return players.length;
-}
-
-async function renameChannelById(client, channelId, nextName, reason) {
-  if (!channelId) {
-    console.warn("[queueChannelSync] channelId mancante, rename saltato.");
-    return;
-  }
-
-  const channel = await client.channels.fetch(channelId).catch((error) => {
-    console.error("[queueChannelSync] Errore fetch channel:", error);
-    return null;
-  });
-
-  if (!channel) {
-    console.warn(`[queueChannelSync] Canale ${channelId} non trovato.`);
-    return;
-  }
-
-  console.log("[queueChannelSync] Canale trovato:", {
-    id: channel.id,
-    name: channel.name,
-    type: channel.type,
-  });
-  console.log("[queueChannelSync] Nuovo nome previsto:", nextName);
-
-  if (channel.name === nextName) {
-    console.log("[queueChannelSync] Il canale ha già il nome corretto. Nessun rename.");
-    return;
-  }
-
-  await channel.setName(nextName, reason);
-  console.log(`[queueChannelSync] Canale rinominato con successo in "${nextName}"`);
-}
-
-async function renameQueueChannel(client, count) {
-  console.log("[queueChannelSync] renameQueueChannel avviato");
-  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
-  console.log("[queueChannelSync] Count richiesto:", count);
-
-  if (!QUEUE_STATUS_CHANNEL_ID) {
-    console.warn("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID non configurato.");
-    return;
-  }
-
-  const nextName = buildChannelName(count);
+  console.log(
+    "[index] QUEUE_STATUS_CHANNEL_ID:",
+    process.env.QUEUE_STATUS_CHANNEL_ID || "(non configurato)"
+  );
 
   try {
-    await renameChannelById(
-      client,
-      QUEUE_STATUS_CHANNEL_ID,
-      nextName,
-      `Queue aggiornata: ${count} giocatori in coda`
-    );
-    lastAppliedCount = count;
-  } catch (error) {
-    console.error("[queueChannelSync] Errore durante rename queue channel:", error);
-    throw error;
-  }
-}
+    ensureRankDataFile();
+    console.log("[index] Rank data file pronto");
 
-async function renameVoiceStatusChannel(client, isActive) {
-  if (!QUEUE_VOICE_CHANNEL_ID) {
-    console.log("[queueChannelSync] QUEUE_VOICE_CHANNEL_ID non configurato: salto rename vocale.");
-    return;
-  }
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const fullGuild = await guild.fetch();
 
-  const nextName = isActive ? QUEUE_VOICE_ACTIVE_NAME : QUEUE_VOICE_IDLE_NAME;
-  const reason = isActive ? "Match in corso" : "Match terminato o annullato";
-
-  try {
-    await renameChannelById(client, QUEUE_VOICE_CHANNEL_ID, nextName, reason);
-  } catch (error) {
-    console.error("[queueChannelSync] Errore durante rename voice status channel:", error);
-  }
-}
-
-async function setMatchState(client, nextState, action) {
-  console.log("[queueChannelSync] Stato match attuale:", matchInProgress);
-  console.log("[queueChannelSync] Nuovo stato match richiesto:", nextState);
-  console.log("[queueChannelSync] Action che ha causato il cambio:", action || "(vuota)");
-
-  if (matchInProgress === nextState) {
-    console.log("[queueChannelSync] Stato match invariato. Nessun rename vocale necessario.");
-    return;
-  }
-
-  matchInProgress = nextState;
-  await renameVoiceStatusChannel(client, matchInProgress);
-}
-
-function scheduleRename(client, count) {
-  console.log("[queueChannelSync] scheduleRename chiamato con count:", count);
-  console.log("[queueChannelSync] lastAppliedCount:", lastAppliedCount);
-  console.log("[queueChannelSync] pendingCount precedente:", pendingCount);
-
-  pendingCount = count;
-
-  if (renameTimer) {
-    console.log("[queueChannelSync] Timer esistente trovato. Lo resetto.");
-    clearTimeout(renameTimer);
-  }
-
-  renameTimer = setTimeout(async () => {
-    console.log("[queueChannelSync] Timer rename scattato");
-    console.log("[queueChannelSync] pendingCount:", pendingCount);
-    console.log("[queueChannelSync] lastAppliedCount:", lastAppliedCount);
-
-    try {
-      if (pendingCount === null) {
-        console.log("[queueChannelSync] pendingCount nullo. Esco.");
-        return;
-      }
-
-      if (pendingCount === lastAppliedCount) {
-        console.log("[queueChannelSync] Count uguale all'ultimo applicato. Nessun rename necessario.");
-        return;
-      }
-
-      await renameQueueChannel(client, pendingCount);
-    } catch (error) {
-      console.error("[queueChannelSync] Errore rename canale:", error);
-    } finally {
-      renameTimer = null;
-      console.log("[queueChannelSync] Timer rename chiuso");
-    }
-  }, RENAME_DEBOUNCE_MS);
-}
-
-function collectRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-
-    req.on("data", (chunk) => {
-      body += chunk.toString("utf8");
-
-      if (body.length > 1024 * 1024) {
-        reject(new Error("Payload troppo grande."));
-        req.destroy();
-      }
+    console.log("[index] Guild caricata:", {
+      id: fullGuild.id,
+      name: fullGuild.name,
+      memberCount: fullGuild.memberCount,
     });
 
-    req.on("end", () => resolve(body));
-    req.on("error", reject);
-  });
-}
+    const result = await syncOnlyVoiceUsers(client, fullGuild);
+    console.log("[index] Sync iniziale completato:", result);
 
-function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(payload));
-}
+    setInterval(async () => {
+      try {
+        console.log("[index] Avvio sync orario...");
+        const hourlyResult = await syncOnlyVoiceUsers(client, fullGuild);
+        console.log("[index] Sync orario completato:", hourlyResult);
+      } catch (error) {
+        console.error("[index] Errore sync orario:", error);
+      }
+    }, SYNC_INTERVAL_MS);
 
-async function handleWebhook(req, res, client) {
-  console.log("==================================================");
-  console.log("[queueChannelSync] WEBHOOK RICEVUTO");
-  console.log("[queueChannelSync] Method:", req.method);
-  console.log("[queueChannelSync] URL:", req.url);
-  console.log("[queueChannelSync] Headers:", req.headers);
+    console.log("[index] Avvio monitor Twitch...");
+    startTwitchMonitor(client);
 
-  if (!NEATQUEUE_WEBHOOK_TOKEN) {
-    console.error("[queueChannelSync] NEATQUEUE_WEBHOOK_TOKEN non configurato");
-    sendJson(res, 500, { ok: false, error: "NEATQUEUE_WEBHOOK_TOKEN non configurato" });
-    return;
-  }
-
-  const authHeader = req.headers.authorization || "";
-  console.log("[queueChannelSync] Authorization ricevuto:", authHeader);
-  console.log("[queueChannelSync] Authorization atteso:", NEATQUEUE_WEBHOOK_TOKEN);
-
-  if (authHeader !== NEATQUEUE_WEBHOOK_TOKEN) {
-    console.warn("[queueChannelSync] Authorization non valida");
-    sendJson(res, 401, { ok: false, error: "Unauthorized" });
-    return;
-  }
-
-  let payload;
-  let rawBody = "";
-
-  try {
-    rawBody = await collectRawBody(req);
-    console.log("[queueChannelSync] Raw body:", rawBody);
-    payload = JSON.parse(rawBody || "{}");
+    console.log("[index] Avvio webhook server NeatQueue...");
+    startQueueChannelWebhookServer(client);
   } catch (error) {
-    console.error("[queueChannelSync] Errore parsing JSON:", error);
-    sendJson(res, 400, { ok: false, error: "JSON non valido" });
-    return;
+    console.error("[index] Errore nel bootstrap del bot:", error);
   }
+});
 
-  console.log("[queueChannelSync] Payload parsato:", payload);
-
-  const action = extractAction(payload);
-  const players = extractPlayersArray(payload);
-  const count = extractCount(payload, action);
-
-  console.log("[queueChannelSync] Action estratta:", action || "(vuota)");
-  console.log("[queueChannelSync] Players estratti:", players);
-  console.log("[queueChannelSync] Count estratto:", count);
-
-  if (!shouldHandleQueue(payload)) {
-    console.log("[queueChannelSync] Evento ignorato: queue non corrispondente");
-    sendJson(res, 200, {
-      ok: true,
-      ignored: true,
-      reason: "Queue diversa da quella configurata",
+client.on("interactionCreate", async (interaction) => {
+  try {
+    console.log("[index] interactionCreate:", {
+      type: interaction.type,
+      isChatInputCommand: interaction.isChatInputCommand(),
+      isStringSelectMenu: interaction.isStringSelectMenu(),
+      userId: interaction.user?.id,
+      commandName: interaction.commandName || null,
+      customId: interaction.customId || null,
     });
-    return;
-  }
 
-  if (isMatchActiveAction(action)) {
-    console.log("[queueChannelSync] Match rilevato come attivo");
-    await setMatchState(client, true, action);
-  } else if (isMatchIdleAction(action)) {
-    console.log("[queueChannelSync] Match rilevato come terminato/idle");
-    await setMatchState(client, false, action);
-  } else {
-    console.log("[queueChannelSync] Nessun cambio stato match richiesto da questo evento");
-  }
-
-  console.log("[queueChannelSync] Evento accettato, pianifico rename coda");
-  scheduleRename(client, count);
-
-  sendJson(res, 200, {
-    ok: true,
-    action: action || null,
-    count,
-    matchInProgress,
-    received: true,
-  });
-}
-
-function startQueueChannelWebhookServer(client) {
-  if (started) {
-    console.log("[queueChannelSync] Server già avviato");
-    return;
-  }
-
-  console.log("[queueChannelSync] Avvio webhook server...");
-  console.log("[queueChannelSync] PORT:", PORT);
-  console.log("[queueChannelSync] NEATQUEUE_WEBHOOK_PATH:", NEATQUEUE_WEBHOOK_PATH);
-  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
-  console.log("[queueChannelSync] QUEUE_VOICE_CHANNEL_ID:", QUEUE_VOICE_CHANNEL_ID || "(non configurato)");
-  console.log("[queueChannelSync] QUEUE_CHANNEL_NAME_PREFIX:", QUEUE_CHANNEL_NAME_PREFIX);
-  console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME:", NEATQUEUE_QUEUE_NAME || "(tutte)");
-  console.log("[queueChannelSync] RENAME_DEBOUNCE_MS:", RENAME_DEBOUNCE_MS);
-
-  const server = http.createServer(async (req, res) => {
-    try {
-      const requestPath = normalizePath(req.url);
-
-      console.log("--------------------------------------------------");
-      console.log("[queueChannelSync] Richiesta ricevuta");
-      console.log("[queueChannelSync] req.method:", req.method);
-      console.log("[queueChannelSync] req.url:", req.url);
-      console.log("[queueChannelSync] requestPath normalizzato:", requestPath);
-      console.log("[queueChannelSync] path atteso:", NEATQUEUE_WEBHOOK_PATH);
-
-      if ((req.method === "GET" || req.method === "HEAD") && requestPath === "/") {
-        console.log("[queueChannelSync] Healthcheck /");
-        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("ok");
+    if (interaction.isStringSelectMenu()) {
+      if (!interaction.customId.startsWith(SEARCH_MENU_PREFIX)) {
         return;
       }
 
-      if (req.method === "POST" && requestPath === NEATQUEUE_WEBHOOK_PATH) {
-        console.log("[queueChannelSync] Match esatto sul webhook path");
-        await handleWebhook(req, res, client);
+      const requesterId = interaction.customId.slice(SEARCH_MENU_PREFIX.length);
+
+      if (interaction.user.id !== requesterId) {
+        await interaction.reply({
+          content: "Questo menu non è destinato a te.",
+          ephemeral: true,
+        });
         return;
       }
 
-      console.log("[queueChannelSync] Nessun match route. Rispondo 404.");
-      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("not found");
-    } catch (error) {
-      console.error("[queueChannelSync] Errore server:", error);
-      sendJson(res, 500, { ok: false, error: "Errore interno" });
+      const profileId = interaction.values[0];
+      const player = await fetchPlayerProfile(profileId);
+
+      const links = loadRankLinks();
+      links[interaction.user.id] = {
+        profileId: String(profileId),
+        playerName: player?.name || null,
+        linkedAt: new Date().toISOString(),
+        lastSoloRank: null,
+        lastTeamRank: null,
+      };
+      saveRankLinks(links);
+
+      const snapshot = await syncMemberRoles(
+        client,
+        interaction.guild,
+        interaction.user.id,
+        links[interaction.user.id]
+      );
+
+      await interaction.update({
+        content: [
+          `Profilo collegato: **${player?.name || "Sconosciuto"}** (${profileId})`,
+          formatSnapshot(snapshot),
+        ].join("\n"),
+        components: [],
+      });
+      return;
     }
+
+    if (!interaction.isChatInputCommand()) {
+      return;
+    }
+
+    if (interaction.commandName === "link") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const profileId = interaction.options.getString("profile_id", true).trim();
+      const player = await fetchPlayerProfile(profileId);
+
+      const links = loadRankLinks();
+      links[interaction.user.id] = {
+        profileId,
+        playerName: player?.name || null,
+        linkedAt: new Date().toISOString(),
+        lastSoloRank: null,
+        lastTeamRank: null,
+      };
+      saveRankLinks(links);
+
+      const snapshot = await syncMemberRoles(
+        client,
+        interaction.guild,
+        interaction.user.id,
+        links[interaction.user.id]
+      );
+
+      await interaction.editReply(
+        [
+          `Profilo collegato: **${player?.name || "Sconosciuto"}** (${profileId})`,
+          formatSnapshot(snapshot),
+        ].join("\n")
+      );
+      return;
+    }
+
+    if (interaction.commandName === "linkname") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const query = interaction.options.getString("name", true).trim();
+      const results = await searchPlayers(query);
+
+      if (!results.length) {
+        await interaction.editReply("Nessun giocatore trovato con quel nome.");
+        return;
+      }
+
+      if (results.length === 1) {
+        const player = results[0];
+        const profileId = String(player.profile_id || player.id || "");
+
+        if (!profileId) {
+          throw new Error("Il risultato trovato non contiene un profile ID valido.");
+        }
+
+        const playerProfile = await fetchPlayerProfile(profileId);
+
+        const links = loadRankLinks();
+        links[interaction.user.id] = {
+          profileId,
+          playerName: playerProfile?.name || player?.name || null,
+          linkedAt: new Date().toISOString(),
+          lastSoloRank: null,
+          lastTeamRank: null,
+        };
+        saveRankLinks(links);
+
+        const snapshot = await syncMemberRoles(
+          client,
+          interaction.guild,
+          interaction.user.id,
+          links[interaction.user.id]
+        );
+
+        await interaction.editReply(
+          [
+            `Profilo collegato automaticamente: **${playerProfile?.name || player?.name || "Sconosciuto"}** (${profileId})`,
+            formatSnapshot(snapshot),
+          ].join("\n")
+        );
+        return;
+      }
+
+      const options = results
+        .slice(0, 25)
+        .map((player, index) => {
+          const profileId = String(player.profile_id || player.id || "");
+          const playerName = String(player.name || `Giocatore ${index + 1}`).slice(0, 100);
+          const country = player.country ? ` | ${player.country}` : "";
+          const description = `ID: ${profileId}${country}`.slice(0, 100);
+
+          return {
+            label: playerName,
+            description,
+            value: profileId,
+          };
+        })
+        .filter((option) => option.value);
+
+      if (!options.length) {
+        await interaction.editReply("Ho trovato risultati, ma nessuno con profile ID valido.");
+        return;
+      }
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`${SEARCH_MENU_PREFIX}${interaction.user.id}`)
+        .setPlaceholder("Scegli il tuo profilo AoE4")
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(menu);
+
+      await interaction.editReply({
+        content: "Ho trovato più profili. Seleziona quello corretto:",
+        components: [row],
+      });
+      return;
+    }
+
+    if (interaction.commandName === "unlink") {
+      const links = loadRankLinks();
+      const entry = links[interaction.user.id];
+
+      if (!entry) {
+        await interaction.reply({
+          content: "Non hai nessun profilo collegato.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      delete links[interaction.user.id];
+      saveRankLinks(links);
+
+      await syncMemberRoles(client, interaction.guild, interaction.user.id, {
+        profileId: null,
+        lastSoloRank: null,
+        lastTeamRank: null,
+        clearOnly: true,
+      });
+
+      await interaction.reply({
+        content: "Profilo scollegato e ruoli rank rimossi.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "syncme") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const links = loadRankLinks();
+      const entry = links[interaction.user.id];
+
+      if (!entry) {
+        await interaction.editReply("Non hai ancora collegato un profilo. Usa `/link` o `/linkname`.");
+        return;
+      }
+
+      const snapshot = await syncMemberRoles(client, interaction.guild, interaction.user.id, entry);
+
+      await interaction.editReply(
+        [`Ruoli aggiornati.`, formatSnapshot(snapshot)].join("\n")
+      );
+      return;
+    }
+
+    if (interaction.commandName === "syncvoice") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const result = await syncOnlyVoiceUsers(client, interaction.guild);
+
+      await interaction.editReply(
+        [
+          "Sync completato.",
+          `Utenti in vocale trovati: **${result.processed}**`,
+          `Aggiornati: **${result.updated}**`,
+          `Saltati senza profilo collegato: **${result.skipped}**`,
+          `Errori: **${result.errors}**`,
+        ].join("\n")
+      );
+    }
+  } catch (error) {
+    console.error("[index] Errore interaction completo:", error);
+    console.error("[index] Codice errore:", error.code);
+    console.error("[index] Messaggio errore:", error.message);
+    console.error("[index] Stack:", error.stack);
+
+    const message = `Errore: ${error.message}`;
+
+    if (interaction.isRepliable()) {
+      if (interaction.deferred) {
+        await interaction.editReply(message);
+      } else if (interaction.replied) {
+        await interaction.followUp({ content: message, ephemeral: true });
+      } else {
+        await interaction.reply({ content: message, ephemeral: true });
+      }
+    }
+  }
+});
+
+registerCommands()
+  .then(async () => {
+    console.log("[index] Login bot in corso...");
+    await client.login(TOKEN);
+    console.log("[index] Login completato");
+  })
+  .catch((error) => {
+    console.error("[index] Errore avvio bot:", error);
   });
-
-  server.listen(PORT, () => {
-    started = true;
-    console.log(
-      `[queueChannelSync] Webhook server in ascolto su porta ${PORT} - path ${NEATQUEUE_WEBHOOK_PATH}`
-    );
-  });
-
-  return server;
-}
-
-module.exports = {
-  startQueueChannelWebhookServer,
-};

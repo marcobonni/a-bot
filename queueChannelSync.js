@@ -1,12 +1,17 @@
 const http = require("http");
 
 const PORT = Number(process.env.PORT || 3000);
-const NEATQUEUE_WEBHOOK_PATH =
-  process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook";
+const RAW_WEBHOOK_PATH = process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook";
 const NEATQUEUE_WEBHOOK_TOKEN = process.env.NEATQUEUE_WEBHOOK_TOKEN || "";
+
 const QUEUE_STATUS_CHANNEL_ID = process.env.QUEUE_STATUS_CHANNEL_ID || "";
 const QUEUE_CHANNEL_NAME_PREFIX =
   process.env.QUEUE_CHANNEL_NAME_PREFIX || "giocatori-in-coda";
+
+const QUEUE_VOICE_CHANNEL_ID = process.env.QUEUE_VOICE_CHANNEL_ID || "";
+const QUEUE_VOICE_IDLE_NAME = process.env.QUEUE_VOICE_IDLE_NAME || "zozza-disponibile";
+const QUEUE_VOICE_ACTIVE_NAME = process.env.QUEUE_VOICE_ACTIVE_NAME || "zozza-in-corso";
+
 const NEATQUEUE_QUEUE_NAME = process.env.NEATQUEUE_QUEUE_NAME || "";
 const RENAME_DEBOUNCE_MS = Number(process.env.RENAME_DEBOUNCE_MS || 5000);
 
@@ -14,6 +19,16 @@ let started = false;
 let renameTimer = null;
 let pendingCount = null;
 let lastAppliedCount = null;
+let matchInProgress = false;
+
+function normalizePath(path) {
+  const value = String(path || "").trim();
+  if (!value) return "/";
+  const withLeadingSlash = value.startsWith("/") ? value : `/${value}`;
+  return withLeadingSlash.replace(/\/+$/, "") || "/";
+}
+
+const NEATQUEUE_WEBHOOK_PATH = normalizePath(RAW_WEBHOOK_PATH);
 
 function sanitizeTextChannelName(value) {
   return String(value)
@@ -34,11 +49,16 @@ function normalizeQueueName(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeActionName(action) {
+  return String(action || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]/g, "_");
+}
+
 function shouldHandleQueue(payload) {
   if (!NEATQUEUE_QUEUE_NAME) {
-    console.log(
-      "[queueChannelSync] NEATQUEUE_QUEUE_NAME non configurato: accetto tutti gli eventi."
-    );
+    console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME non configurato: accetto tutti gli eventi.");
     return true;
   }
 
@@ -102,31 +122,81 @@ function extractAction(payload) {
   return "";
 }
 
-async function renameQueueChannel(client, count) {
-  console.log("[queueChannelSync] renameQueueChannel avviato");
-  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
-  console.log("[queueChannelSync] Count richiesto:", count);
+function isClearQueueAction(action) {
+  const normalized = normalizeActionName(action);
+  return normalized === "CLEARQUEUE" || normalized === "CLEAR_QUEUE";
+}
 
-  if (!QUEUE_STATUS_CHANNEL_ID) {
-    console.warn(
-      "[queueChannelSync] QUEUE_STATUS_CHANNEL_ID non configurato. Rename saltato."
-    );
+function isMatchActiveAction(action) {
+  const normalized = normalizeActionName(action);
+  return (
+    normalized === "MATCH_STARTED" ||
+    normalized === "TEAMS_CREATED" ||
+    normalized === "MATCH_CREATED" ||
+    normalized === "GAME_STARTED"
+  );
+}
+
+function isMatchIdleAction(action) {
+  const normalized = normalizeActionName(action);
+  return (
+    normalized === "MATCH_COMPLETED" ||
+    normalized === "MATCH_CANCELLED" ||
+    normalized === "MATCH_ENDED" ||
+    normalized === "GAME_ENDED"
+  );
+}
+
+function extractCount(payload, action) {
+  const players = extractPlayersArray(payload);
+
+  if (players.length > 0) {
+    return players.length;
+  }
+
+  const numericCandidates = [
+    payload?.count,
+    payload?.playerCount,
+    payload?.player_count,
+    payload?.queueCount,
+    payload?.queue_count,
+    payload?.data?.count,
+    payload?.data?.playerCount,
+    payload?.data?.player_count,
+    payload?.data?.queueCount,
+    payload?.data?.queue_count,
+  ];
+
+  for (const candidate of numericCandidates) {
+    const numericValue = Number(candidate);
+    if (Number.isFinite(numericValue) && numericValue >= 0) {
+      return numericValue;
+    }
+  }
+
+  if (isClearQueueAction(action)) {
+    console.log("[queueChannelSync] Evento clear queue rilevato: imposto count a 0");
+    return 0;
+  }
+
+  return players.length;
+}
+
+async function renameChannelById(client, channelId, nextName, reason) {
+  if (!channelId) {
+    console.warn("[queueChannelSync] channelId mancante, rename saltato.");
     return;
   }
 
-  const channel = await client.channels.fetch(QUEUE_STATUS_CHANNEL_ID).catch((error) => {
+  const channel = await client.channels.fetch(channelId).catch((error) => {
     console.error("[queueChannelSync] Errore fetch channel:", error);
     return null;
   });
 
   if (!channel) {
-    console.warn(
-      `[queueChannelSync] Canale ${QUEUE_STATUS_CHANNEL_ID} non trovato.`
-    );
+    console.warn(`[queueChannelSync] Canale ${channelId} non trovato.`);
     return;
   }
-
-  const nextName = buildChannelName(count);
 
   console.log("[queueChannelSync] Canale trovato:", {
     id: channel.id,
@@ -137,21 +207,67 @@ async function renameQueueChannel(client, count) {
 
   if (channel.name === nextName) {
     console.log("[queueChannelSync] Il canale ha già il nome corretto. Nessun rename.");
-    lastAppliedCount = count;
     return;
   }
 
-  try {
-    await channel.setName(nextName, `Queue aggiornata: ${count} giocatori in coda`);
-    lastAppliedCount = count;
+  await channel.setName(nextName, reason);
+  console.log(`[queueChannelSync] Canale rinominato con successo in "${nextName}"`);
+}
 
-    console.log(
-      `[queueChannelSync] Canale rinominato con successo in "${nextName}" (count=${count})`
+async function renameQueueChannel(client, count) {
+  console.log("[queueChannelSync] renameQueueChannel avviato");
+  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
+  console.log("[queueChannelSync] Count richiesto:", count);
+
+  if (!QUEUE_STATUS_CHANNEL_ID) {
+    console.warn("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID non configurato.");
+    return;
+  }
+
+  const nextName = buildChannelName(count);
+
+  try {
+    await renameChannelById(
+      client,
+      QUEUE_STATUS_CHANNEL_ID,
+      nextName,
+      `Queue aggiornata: ${count} giocatori in coda`
     );
+    lastAppliedCount = count;
   } catch (error) {
-    console.error("[queueChannelSync] Errore durante setName:", error);
+    console.error("[queueChannelSync] Errore durante rename queue channel:", error);
     throw error;
   }
+}
+
+async function renameVoiceStatusChannel(client, isActive) {
+  if (!QUEUE_VOICE_CHANNEL_ID) {
+    console.log("[queueChannelSync] QUEUE_VOICE_CHANNEL_ID non configurato: salto rename vocale.");
+    return;
+  }
+
+  const nextName = isActive ? QUEUE_VOICE_ACTIVE_NAME : QUEUE_VOICE_IDLE_NAME;
+  const reason = isActive ? "Match in corso" : "Match terminato o annullato";
+
+  try {
+    await renameChannelById(client, QUEUE_VOICE_CHANNEL_ID, nextName, reason);
+  } catch (error) {
+    console.error("[queueChannelSync] Errore durante rename voice status channel:", error);
+  }
+}
+
+async function setMatchState(client, nextState, action) {
+  console.log("[queueChannelSync] Stato match attuale:", matchInProgress);
+  console.log("[queueChannelSync] Nuovo stato match richiesto:", nextState);
+  console.log("[queueChannelSync] Action che ha causato il cambio:", action || "(vuota)");
+
+  if (matchInProgress === nextState) {
+    console.log("[queueChannelSync] Stato match invariato. Nessun rename vocale necessario.");
+    return;
+  }
+
+  matchInProgress = nextState;
+  await renameVoiceStatusChannel(client, matchInProgress);
 }
 
 function scheduleRename(client, count) {
@@ -178,9 +294,7 @@ function scheduleRename(client, count) {
       }
 
       if (pendingCount === lastAppliedCount) {
-        console.log(
-          "[queueChannelSync] Count uguale all'ultimo applicato. Nessun rename necessario."
-        );
+        console.log("[queueChannelSync] Count uguale all'ultimo applicato. Nessun rename necessario.");
         return;
       }
 
@@ -223,14 +337,10 @@ async function handleWebhook(req, res, client) {
   console.log("[queueChannelSync] Method:", req.method);
   console.log("[queueChannelSync] URL:", req.url);
   console.log("[queueChannelSync] Headers:", req.headers);
-  console.log("[queueChannelSync] Path atteso:", NEATQUEUE_WEBHOOK_PATH);
 
   if (!NEATQUEUE_WEBHOOK_TOKEN) {
     console.error("[queueChannelSync] NEATQUEUE_WEBHOOK_TOKEN non configurato");
-    sendJson(res, 500, {
-      ok: false,
-      error: "NEATQUEUE_WEBHOOK_TOKEN non configurato",
-    });
+    sendJson(res, 500, { ok: false, error: "NEATQUEUE_WEBHOOK_TOKEN non configurato" });
     return;
   }
 
@@ -261,9 +371,9 @@ async function handleWebhook(req, res, client) {
 
   const action = extractAction(payload);
   const players = extractPlayersArray(payload);
-  const count = players.length;
+  const count = extractCount(payload, action);
 
-  console.log("[queueChannelSync] Action estratta:", action);
+  console.log("[queueChannelSync] Action estratta:", action || "(vuota)");
   console.log("[queueChannelSync] Players estratti:", players);
   console.log("[queueChannelSync] Count estratto:", count);
 
@@ -277,23 +387,24 @@ async function handleWebhook(req, res, client) {
     return;
   }
 
-  if (action && action !== "JOIN_QUEUE" && action !== "LEAVE_QUEUE") {
-    console.log("[queueChannelSync] Evento ignorato:", action);
-    sendJson(res, 200, {
-      ok: true,
-      ignored: true,
-      reason: `Evento non gestito: ${action}`,
-    });
-    return;
+  if (isMatchActiveAction(action)) {
+    console.log("[queueChannelSync] Match rilevato come attivo");
+    await setMatchState(client, true, action);
+  } else if (isMatchIdleAction(action)) {
+    console.log("[queueChannelSync] Match rilevato come terminato/idle");
+    await setMatchState(client, false, action);
+  } else {
+    console.log("[queueChannelSync] Nessun cambio stato match richiesto da questo evento");
   }
 
-  console.log("[queueChannelSync] Evento accettato, pianifico rename");
+  console.log("[queueChannelSync] Evento accettato, pianifico rename coda");
   scheduleRename(client, count);
 
   sendJson(res, 200, {
     ok: true,
     action: action || null,
     count,
+    matchInProgress,
     received: true,
   });
 }
@@ -308,25 +419,30 @@ function startQueueChannelWebhookServer(client) {
   console.log("[queueChannelSync] PORT:", PORT);
   console.log("[queueChannelSync] NEATQUEUE_WEBHOOK_PATH:", NEATQUEUE_WEBHOOK_PATH);
   console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
+  console.log("[queueChannelSync] QUEUE_VOICE_CHANNEL_ID:", QUEUE_VOICE_CHANNEL_ID || "(non configurato)");
   console.log("[queueChannelSync] QUEUE_CHANNEL_NAME_PREFIX:", QUEUE_CHANNEL_NAME_PREFIX);
   console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME:", NEATQUEUE_QUEUE_NAME || "(tutte)");
   console.log("[queueChannelSync] RENAME_DEBOUNCE_MS:", RENAME_DEBOUNCE_MS);
 
   const server = http.createServer(async (req, res) => {
     try {
+      const requestPath = normalizePath(req.url);
+
       console.log("--------------------------------------------------");
       console.log("[queueChannelSync] Richiesta ricevuta");
       console.log("[queueChannelSync] req.method:", req.method);
       console.log("[queueChannelSync] req.url:", req.url);
+      console.log("[queueChannelSync] requestPath normalizzato:", requestPath);
+      console.log("[queueChannelSync] path atteso:", NEATQUEUE_WEBHOOK_PATH);
 
-      if (req.method === "GET" && req.url === "/") {
+      if ((req.method === "GET" || req.method === "HEAD") && requestPath === "/") {
         console.log("[queueChannelSync] Healthcheck /");
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("ok");
         return;
       }
 
-      if (req.method === "POST" && req.url === NEATQUEUE_WEBHOOK_PATH) {
+      if (req.method === "POST" && requestPath === NEATQUEUE_WEBHOOK_PATH) {
         console.log("[queueChannelSync] Match esatto sul webhook path");
         await handleWebhook(req, res, client);
         return;
