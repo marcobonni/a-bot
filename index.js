@@ -9,6 +9,7 @@ const {
   StringSelectMenuBuilder,
 } = require("discord.js");
 const { startTwitchMonitor } = require("./twitch");
+const { startQueueChannelWebhookServer } = require("./queueChannelSync");
 const {
   ensureRankDataFile,
   loadRankLinks,
@@ -106,6 +107,7 @@ client.once("ready", async () => {
     }, SYNC_INTERVAL_MS);
 
     startTwitchMonitor(client);
+    startQueueChannelWebhookServer(client);
   } catch (error) {
     console.error("Errore nel bootstrap del bot:", error);
   }
@@ -364,8 +366,3 @@ registerCommands()
   .catch((error) => {
     console.error("Errore avvio bot:", error);
   });
-
-  
-  require("http")
-  .createServer((req, res) => res.end("ok"))
-  .listen(process.env.PORT || 3000);
