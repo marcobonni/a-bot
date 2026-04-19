@@ -43,6 +43,8 @@ const client = new Client({
 });
 
 async function registerCommands() {
+  console.log("[index] Registrazione comandi slash...");
+
   const commands = [
     new SlashCommandBuilder()
       .setName("link")
@@ -83,38 +85,72 @@ async function registerCommands() {
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
     body: commands,
   });
+
+  console.log("[index] Comandi slash registrati con successo");
 }
 
 client.once("ready", async () => {
-  console.log(`Bot online come ${client.user.tag}`);
+  console.log(`[index] Bot online come ${client.user.tag}`);
+  console.log("[index] Variabili principali:");
+  console.log("[index] GUILD_ID:", GUILD_ID);
+  console.log("[index] CLIENT_ID:", CLIENT_ID);
+  console.log("[index] PORT:", process.env.PORT || 3000);
+  console.log(
+    "[index] NEATQUEUE_WEBHOOK_PATH:",
+    process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook"
+  );
+  console.log(
+    "[index] QUEUE_STATUS_CHANNEL_ID:",
+    process.env.QUEUE_STATUS_CHANNEL_ID || "(non configurato)"
+  );
 
   try {
     ensureRankDataFile();
+    console.log("[index] Rank data file pronto");
 
     const guild = await client.guilds.fetch(GUILD_ID);
     const fullGuild = await guild.fetch();
 
+    console.log("[index] Guild caricata:", {
+      id: fullGuild.id,
+      name: fullGuild.name,
+      memberCount: fullGuild.memberCount,
+    });
+
     const result = await syncOnlyVoiceUsers(client, fullGuild);
-    console.log("Sync iniziale completato:", result);
+    console.log("[index] Sync iniziale completato:", result);
 
     setInterval(async () => {
       try {
+        console.log("[index] Avvio sync orario...");
         const hourlyResult = await syncOnlyVoiceUsers(client, fullGuild);
-        console.log("Sync orario completato:", hourlyResult);
+        console.log("[index] Sync orario completato:", hourlyResult);
       } catch (error) {
-        console.error("Errore sync orario:", error);
+        console.error("[index] Errore sync orario:", error);
       }
     }, SYNC_INTERVAL_MS);
 
+    console.log("[index] Avvio monitor Twitch...");
     startTwitchMonitor(client);
+
+    console.log("[index] Avvio webhook server NeatQueue...");
     startQueueChannelWebhookServer(client);
   } catch (error) {
-    console.error("Errore nel bootstrap del bot:", error);
+    console.error("[index] Errore nel bootstrap del bot:", error);
   }
 });
 
 client.on("interactionCreate", async (interaction) => {
   try {
+    console.log("[index] interactionCreate:", {
+      type: interaction.type,
+      isChatInputCommand: interaction.isChatInputCommand(),
+      isStringSelectMenu: interaction.isStringSelectMenu(),
+      userId: interaction.user?.id,
+      commandName: interaction.commandName || null,
+      customId: interaction.customId || null,
+    });
+
     if (interaction.isStringSelectMenu()) {
       if (!interaction.customId.startsWith(SEARCH_MENU_PREFIX)) {
         return;
@@ -342,10 +378,10 @@ client.on("interactionCreate", async (interaction) => {
       );
     }
   } catch (error) {
-    console.error("Errore interaction completo:", error);
-    console.error("Codice errore:", error.code);
-    console.error("Messaggio errore:", error.message);
-    console.error("Stack:", error.stack);
+    console.error("[index] Errore interaction completo:", error);
+    console.error("[index] Codice errore:", error.code);
+    console.error("[index] Messaggio errore:", error.message);
+    console.error("[index] Stack:", error.stack);
 
     const message = `Errore: ${error.message}`;
 
@@ -362,7 +398,11 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 registerCommands()
-  .then(() => client.login(TOKEN))
+  .then(async () => {
+    console.log("[index] Login bot in corso...");
+    await client.login(TOKEN);
+    console.log("[index] Login completato");
+  })
   .catch((error) => {
-    console.error("Errore avvio bot:", error);
+    console.error("[index] Errore avvio bot:", error);
   });
