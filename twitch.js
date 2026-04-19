@@ -10,7 +10,9 @@ const TWITCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 
 let twitchAccessToken = null;
 let twitchAccessTokenExpiresAt = 0;
+
 const liveStatusCache = new Map();
+const liveMessages = new Map(); // 🔥 NEW → salva messageId per streamer
 
 async function fetchJson(url, errorPrefix, options = {}) {
   const response = await fetch(url, options);
@@ -86,30 +88,42 @@ function buildTwitchLiveMessage(stream) {
 }
 
 async function notifyDiscordLive(client, stream) {
-  if (!DISCORD_LIVE_CHANNEL_ID) {
-    throw new Error("Manca DISCORD_LIVE_CHANNEL_ID");
-  }
-
   const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
 
-  if (!channel || typeof channel.send !== "function") {
-    throw new Error("Canale Discord live non valido o non scrivibile");
-  }
-
-  await channel.send({
+  const message = await channel.send({
     content: buildTwitchLiveMessage(stream),
   });
+
+  // 🔥 salva messageId
+  liveMessages.set(stream.user_login.toLowerCase(), message.id);
+}
+
+async function removeDiscordLiveMessage(client, streamer) {
+  const messageId = liveMessages.get(streamer);
+
+  if (!messageId) return;
+
+  try {
+    const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
+    const message = await channel.messages.fetch(messageId);
+
+    if (message) {
+      await message.delete();
+    }
+  } catch (err) {
+    console.error("Errore cancellazione messaggio:", err.message);
+  }
+
+  liveMessages.delete(streamer);
 }
 
 async function pollTwitchLives(client) {
-  if (!TWITCH_STREAMERS.length) {
-    return;
-  }
+  if (!TWITCH_STREAMERS.length) return;
 
   const liveStreams = await getLiveStreamsByLogins(TWITCH_STREAMERS);
 
   const currentlyLive = new Set(
-    liveStreams.map((stream) => String(stream.user_login).toLowerCase())
+    liveStreams.map((stream) => stream.user_login.toLowerCase())
   );
 
   for (const streamer of TWITCH_STREAMERS) {
@@ -117,14 +131,20 @@ async function pollTwitchLives(client) {
     const wasLive = liveStatusCache.get(key) === true;
     const isLive = currentlyLive.has(key);
 
+    // 🔴 VA LIVE
     if (!wasLive && isLive) {
       const stream = liveStreams.find(
-        (item) => String(item.user_login).toLowerCase() === key
+        (s) => s.user_login.toLowerCase() === key
       );
 
       if (stream) {
         await notifyDiscordLive(client, stream);
       }
+    }
+
+    // ⚫ VA OFFLINE
+    if (wasLive && !isLive) {
+      await removeDiscordLiveMessage(client, key);
     }
 
     liveStatusCache.set(key, isLive);
@@ -133,27 +153,20 @@ async function pollTwitchLives(client) {
 
 function startTwitchMonitor(client) {
   if (!TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || !DISCORD_LIVE_CHANNEL_ID) {
-    console.log("Monitor Twitch disattivato: mancano variabili ambiente Twitch.");
+    console.log("Monitor Twitch disattivato: mancano variabili ambiente.");
     return;
   }
 
   if (!TWITCH_STREAMERS.length) {
-    console.log("Monitor Twitch disattivato: nessuno streamer configurato.");
+    console.log("Monitor Twitch disattivato: nessuno streamer.");
     return;
   }
 
-  pollTwitchLives(client)
-    .then(() => {
-      console.log("Controllo Twitch iniziale completato.");
-    })
-    .catch((error) => {
-      console.error("Errore controllo Twitch iniziale:", error);
-    });
+  pollTwitchLives(client).catch(console.error);
 
   setInterval(async () => {
     try {
       await pollTwitchLives(client);
-      console.log("Controllo Twitch completato.");
     } catch (error) {
       console.error("Errore controllo Twitch:", error);
     }
