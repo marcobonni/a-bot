@@ -1,4 +1,4 @@
-const { ChannelType, EmbedBuilder } = require("discord.js");
+const { ChannelType } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
 
@@ -20,6 +20,15 @@ const TEAM_ROLE_MAP = {
   platinum: process.env.ROLE_TEAM_PLATINUM,
   diamond: process.env.ROLE_TEAM_DIAMOND,
   conqueror: process.env.ROLE_TEAM_CONQUEROR,
+};
+
+const RANK_IMAGE_MAP = {
+  bronze: process.env.RANK_IMAGE_BRONZE || "",
+  silver: process.env.RANK_IMAGE_SILVER || "",
+  gold: process.env.RANK_IMAGE_GOLD || "",
+  platinum: process.env.RANK_IMAGE_PLATINUM || "",
+  diamond: process.env.RANK_IMAGE_DIAMOND || "",
+  conqueror: process.env.RANK_IMAGE_CONQUEROR || "",
 };
 
 const SOLO_ROLE_IDS = Object.values(SOLO_ROLE_MAP).filter(Boolean);
@@ -145,19 +154,6 @@ function getRankValue(rank) {
   return rankOrder[rank] || 0;
 }
 
-function getRankEmoji(rank) {
-  const emojiMap = {
-    bronze: "🟤",
-    silver: "⚪",
-    gold: "🟡",
-    platinum: "🔷",
-    diamond: "💎",
-    conqueror: "👑",
-  };
-
-  return emojiMap[rank] || "🏆";
-}
-
 function formatRankLabel(rank) {
   if (!rank) return "Non classificato";
   return rank.charAt(0).toUpperCase() + rank.slice(1);
@@ -174,43 +170,45 @@ function formatSnapshot(snapshot) {
   ].join("\n");
 }
 
+function getRankImage(rank) {
+  return RANK_IMAGE_MAP[rank] || "";
+}
+
 async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) {
   const channelId = process.env.DISCORD_RANK_CHANNEL_ID;
   if (!channelId) return;
 
-  const channel = await client.channels.fetch(channelId);
+  const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel || typeof channel.send !== "function") return;
 
-  const member = await guild.members.fetch(userId);
-  const emoji = getRankEmoji(newRank);
-  const modeLabel = type === "solo" ? "Ranked Solo" : "Ranked Team";
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`${emoji} Nuovo rank raggiunto`)
-    .setDescription(`${member} ha raggiunto un nuovo rango in **${modeLabel}**.`)
-    .addFields(
-      {
-        name: "Giocatore",
-        value: member.user.username,
-        inline: true,
-      },
-      {
-        name: "Da",
-        value: `${getRankEmoji(oldRank)} ${formatRankLabel(oldRank)}`,
-        inline: true,
-      },
-      {
-        name: "A",
-        value: `${getRankEmoji(newRank)} ${formatRankLabel(newRank)}`,
-        inline: true,
-      }
-    )
-    .setFooter({
-      text: "Age of Empires IV Rank Update",
-    })
-    .setTimestamp();
+  const rankLabel = formatRankLabel(newRank);
+  const modeLabel = type === "solo" ? "solo" : "team";
+  const imageUrl = getRankImage(newRank);
 
-  await channel.send({ embeds: [embed] });
+  const content = `Congratulazione a ${member} per aver raggiunto il rank di ${rankLabel} in ${modeLabel}!`;
+
+  const messagePayload = {
+    content,
+    allowedMentions: {
+      users: [member.id],
+      roles: [],
+    },
+  };
+
+  if (imageUrl) {
+    messagePayload.embeds = [
+      {
+        image: {
+          url: imageUrl,
+        },
+      },
+    ];
+  }
+
+  await channel.send(messagePayload);
 }
 
 async function handleRankUpNotifications(client, guild, discordUserId, oldSolo, newSolo, oldTeam, newTeam) {
