@@ -187,7 +187,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.update({
         content: [
           `Profilo collegato: **${player?.name || "Sconosciuto"}** (${profileId})`,
-          formatSnapshot(snapshot),
+          await formatSnapshot(interaction.guild, snapshot),
         ].join("\n"),
         components: [],
       });
@@ -222,7 +222,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.editReply(
         [
           `Profilo collegato: **${player?.name || "Sconosciuto"}** (${profileId})`,
-          formatSnapshot(snapshot),
+          await formatSnapshot(interaction.guild, snapshot),
         ].join("\n")
       );
       return;
@@ -267,7 +267,7 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.editReply(
           [
             `Profilo collegato automaticamente: **${playerProfile?.name || player?.name || "Sconosciuto"}** (${profileId})`,
-            formatSnapshot(snapshot),
+            await formatSnapshot(interaction.guild, snapshot),
           ].join("\n")
         );
         return;
@@ -350,7 +350,7 @@ client.on("interactionCreate", async (interaction) => {
       const snapshot = await syncMemberRoles(client, interaction.guild, interaction.user.id, entry);
 
       await interaction.editReply(
-        [`Ruoli aggiornati.`, formatSnapshot(snapshot)].join("\n")
+        [`Ruoli aggiornati.`, await formatSnapshot(interaction.guild, snapshot)].join("\n")
       );
       return;
     }

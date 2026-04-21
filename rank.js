@@ -23,6 +23,31 @@ const TEAM_ROLE_MAP = {
   conqueror: process.env.ROLE_TEAM_CONQUEROR,
 };
 
+// const CIV_ROLE_MAP = {
+//   abbasid_dynasty: process.env.ROLE_CIV_ABBASID_DYNASTY,
+//   ayyubids: process.env.ROLE_CIV_AYYUBIDS,
+//   byzantines: process.env.ROLE_CIV_BYZANTINES,
+//   chinese: process.env.ROLE_CIV_CHINESE,
+//   delhi_sultanate: process.env.ROLE_CIV_DELHI_SULTANATE,
+//   english: process.env.ROLE_CIV_ENGLISH,
+//   french: process.env.ROLE_CIV_FRENCH,
+//   golden_horde: process.env.ROLE_CIV_GOLDEN_HORDE,
+//   holy_roman_empire: process.env.ROLE_CIV_HOLY_ROMAN_EMPIRE,
+//   house_of_lancaster: process.env.ROLE_CIV_HOUSE_OF_LANCASTER,
+//   japanese: process.env.ROLE_CIV_JAPANESE,
+//   jeanne_darc: process.env.ROLE_CIV_JEANNE_DARC,
+//   knights_templar: process.env.ROLE_CIV_KNIGHTS_TEMPLAR,
+//   macedonian_dynasty: process.env.ROLE_CIV_MACEDONIAN_DYNASTY,
+//   malians: process.env.ROLE_CIV_MALIANS,
+//   mongols: process.env.ROLE_CIV_MONGOLS,
+//   order_of_the_dragon: process.env.ROLE_CIV_ORDER_OF_THE_DRAGON,
+//   ottomans: process.env.ROLE_CIV_OTTOMANS,
+//   rus: process.env.ROLE_CIV_RUS,
+//   sengoku_daimyo: process.env.ROLE_CIV_SENGOKU_DAIMYO,
+//   tughlaq_dynasty: process.env.ROLE_CIV_TUGHLAQ_DYNASTY,
+//   zhu_xis_legacy: process.env.ROLE_CIV_ZHU_XIS_LEGACY,
+// };
+
 const RANK_IMAGE_MAP = {
   bronze: process.env.RANK_IMAGE_BRONZE || "",
   silver: process.env.RANK_IMAGE_SILVER || "",
@@ -32,8 +57,28 @@ const RANK_IMAGE_MAP = {
   conqueror: process.env.RANK_IMAGE_CONQUEROR || "",
 };
 
+const RANK_EMOJI_NAME_MAP = {
+  solo: {
+    bronze: "solo_bron3",
+    silver: "solo_silver3",
+    gold: "solo_gold3",
+    platinum: "solo_plat3",
+    diamond: "solo_diam3",
+    conqueror: "solo_conq3",
+  },
+  team: {
+    bronze: "team_bron",
+    silver: "team_silv3",
+    gold: "team_gold3",
+    platinum: "team_plat3",
+    diamond: "team_diam3",
+    conqueror: "team_conq3",
+  },
+};
+
 const SOLO_ROLE_IDS = Object.values(SOLO_ROLE_MAP).filter(Boolean);
 const TEAM_ROLE_IDS = Object.values(TEAM_ROLE_MAP).filter(Boolean);
+// const CIV_ROLE_IDS = Object.values(CIV_ROLE_MAP).filter(Boolean);
 
 function normalizeRankLevel(rankLevel) {
   if (!rankLevel) return null;
@@ -49,6 +94,73 @@ function normalizeRankLevel(rankLevel) {
 
   return null;
 }
+
+// function normalizeCivilizationName(value) {
+//   if (!value) return null;
+//
+//   const normalized = String(value)
+//     .trim()
+//     .toLowerCase()
+//     .replace(/['’]/g, "")
+//     .replace(/[^a-z0-9]+/g, "_")
+//     .replace(/^_+|_+$/g, "");
+//
+//   const aliases = {
+//     hre: "holy_roman_empire",
+//     holy_roman_empire_civilization: "holy_roman_empire",
+//     jeanne_d_arc: "jeanne_darc",
+//     order_of_dragon: "order_of_the_dragon",
+//     zhu_xis_legacy: "zhu_xis_legacy",
+//     zhu_xi_s_legacy: "zhu_xis_legacy",
+//     tughluq_dynasty: "tughlaq_dynasty",
+//   };
+//
+//   return aliases[normalized] || normalized;
+// }
+//
+// function extractMostPlayedCivilization(profile) {
+//   const directCandidates = [
+//     profile?.most_played_civilization,
+//     profile?.most_played_civ,
+//     profile?.favorite_civilization,
+//     profile?.favorite_civ,
+//     profile?.main_civilization,
+//     profile?.main_civ,
+//   ];
+//
+//   for (const candidate of directCandidates) {
+//     const normalized = normalizeCivilizationName(candidate);
+//     if (normalized) {
+//       return normalized;
+//     }
+//   }
+//
+//   const listCandidates = [
+//     profile?.most_played_civilizations,
+//     profile?.civilizations,
+//     profile?.favorite_civilizations,
+//     profile?.stats?.civilizations,
+//     profile?.statistics?.civilizations,
+//   ];
+//
+//   for (const candidate of listCandidates) {
+//     if (Array.isArray(candidate) && candidate.length > 0) {
+//       const firstItem = candidate[0];
+//       const normalized = normalizeCivilizationName(
+//         firstItem?.civilization ||
+//           firstItem?.civ ||
+//           firstItem?.name ||
+//           firstItem?.civilization_name
+//       );
+//
+//       if (normalized) {
+//         return normalized;
+//       }
+//     }
+//   }
+//
+//   return null;
+// }
 
 async function fetchJson(url, errorPrefix, options = {}) {
   const response = await fetch(url, options);
@@ -145,12 +257,19 @@ function formatRankLabel(rank) {
   return rank.charAt(0).toUpperCase() + rank.slice(1);
 }
 
-function formatSnapshot(snapshot) {
+async function formatSnapshot(guild, snapshot) {
+  const soloEmoji = snapshot.solo.rank
+    ? await getRankEmoji(guild, "solo", snapshot.solo.rank)
+    : "🏅";
+  const teamEmoji = snapshot.team.rank
+    ? await getRankEmoji(guild, "team", snapshot.team.rank)
+    : "🏅";
+
   return [
-    `Solo: **${snapshot.solo.rank || "non classificato"}**${
+    `Solo: ${soloEmoji} **${snapshot.solo.rank || "non classificato"}**${
       snapshot.solo.rating ? ` (${snapshot.solo.rating})` : ""
     }`,
-    `Team: **${snapshot.team.rank || "non classificato"}**${
+    `Team: ${teamEmoji} **${snapshot.team.rank || "non classificato"}**${
       snapshot.team.rating ? ` (${snapshot.team.rating})` : ""
     }`,
   ].join("\n");
@@ -158,6 +277,22 @@ function formatSnapshot(snapshot) {
 
 function getRankImage(rank) {
   return RANK_IMAGE_MAP[rank] || "";
+}
+
+async function getRankEmoji(guild, type, rank) {
+  const emojiName = RANK_EMOJI_NAME_MAP[type]?.[rank];
+  if (!emojiName) {
+    return "🏅";
+  }
+
+  let emoji = guild.emojis.cache.find((item) => item.name === emojiName);
+
+  if (!emoji) {
+    await guild.emojis.fetch().catch(() => null);
+    emoji = guild.emojis.cache.find((item) => item.name === emojiName);
+  }
+
+  return emoji ? emoji.toString() : "🏅";
 }
 
 async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) {
@@ -170,11 +305,12 @@ async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) 
   const member = await guild.members.fetch(userId).catch(() => null);
   if (!member) return;
 
-  const rankLabel = formatRankLabel(newRank);
   const modeLabel = type === "solo" ? "solo" : "team";
+  const rankLabel = formatRankLabel(newRank);
+  const rankEmoji = await getRankEmoji(guild, type, newRank);
   const imageUrl = getRankImage(newRank);
 
-  const content = `Congratulazione a ${member} per aver raggiunto il rank di ${rankLabel} in ${modeLabel}!`;
+  const content = `Congratulazione a ${member} per aver raggiunto il rank di ${rankEmoji} ${rankLabel} in ${modeLabel}!`;
 
   const messagePayload = {
     content,
@@ -285,6 +421,19 @@ async function clearRankRoles(guild, discordUserId) {
   await removeRankFamily(member, SOLO_ROLE_IDS, null);
   await removeRankFamily(member, TEAM_ROLE_IDS, null);
 }
+
+// async function syncCivilizationRole(member, profile) {
+//   const civilization = extractMostPlayedCivilization(profile);
+//   const civRoleId = civilization ? CIV_ROLE_MAP[civilization] : null;
+//
+//   await removeRankFamily(member, CIV_ROLE_IDS, civRoleId);
+//
+//   if (civRoleId) {
+//     await ensureRankRole(member, civRoleId);
+//   }
+//
+//   return civilization;
+// }
 
 async function syncMemberRoles(client, guild, discordUserId, linkEntry) {
   if (linkEntry?.clearOnly) {
