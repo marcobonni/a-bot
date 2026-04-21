@@ -11,15 +11,15 @@ const {
 const { startTwitchMonitor } = require("./twitch");
 const { startQueueChannelWebhookServer } = require("./queueChannelSync");
 const {
-  ensureRankDataFile,
+  ensureRankStore,
   loadRankLinks,
-  saveRankLinks,
   fetchPlayerProfile,
   searchPlayers,
   syncMemberRoles,
   syncOnlyVoiceUsers,
   formatSnapshot,
 } = require("./rank");
+const { upsertRankLink, deleteRankLink } = require("./rankStore");
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -105,8 +105,8 @@ client.once("ready", async () => {
   );
 
   try {
-    ensureRankDataFile();
-    console.log("[index] Rank data file pronto");
+    await ensureRankStore();
+    console.log("[index] Rank store pronto");
 
     const guild = await client.guilds.fetch(GUILD_ID);
     const fullGuild = await guild.fetch();
@@ -169,21 +169,19 @@ client.on("interactionCreate", async (interaction) => {
       const profileId = interaction.values[0];
       const player = await fetchPlayerProfile(profileId);
 
-      const links = loadRankLinks();
-      links[interaction.user.id] = {
+      const linkEntry = await upsertRankLink(interaction.user.id, {
         profileId: String(profileId),
         playerName: player?.name || null,
         linkedAt: new Date().toISOString(),
         lastSoloRank: null,
         lastTeamRank: null,
-      };
-      saveRankLinks(links);
+      });
 
       const snapshot = await syncMemberRoles(
         client,
         interaction.guild,
         interaction.user.id,
-        links[interaction.user.id]
+        linkEntry
       );
 
       await interaction.update({
@@ -206,21 +204,19 @@ client.on("interactionCreate", async (interaction) => {
       const profileId = interaction.options.getString("profile_id", true).trim();
       const player = await fetchPlayerProfile(profileId);
 
-      const links = loadRankLinks();
-      links[interaction.user.id] = {
+      const linkEntry = await upsertRankLink(interaction.user.id, {
         profileId,
         playerName: player?.name || null,
         linkedAt: new Date().toISOString(),
         lastSoloRank: null,
         lastTeamRank: null,
-      };
-      saveRankLinks(links);
+      });
 
       const snapshot = await syncMemberRoles(
         client,
         interaction.guild,
         interaction.user.id,
-        links[interaction.user.id]
+        linkEntry
       );
 
       await interaction.editReply(
@@ -253,21 +249,19 @@ client.on("interactionCreate", async (interaction) => {
 
         const playerProfile = await fetchPlayerProfile(profileId);
 
-        const links = loadRankLinks();
-        links[interaction.user.id] = {
+        const linkEntry = await upsertRankLink(interaction.user.id, {
           profileId,
           playerName: playerProfile?.name || player?.name || null,
           linkedAt: new Date().toISOString(),
           lastSoloRank: null,
           lastTeamRank: null,
-        };
-        saveRankLinks(links);
+        });
 
         const snapshot = await syncMemberRoles(
           client,
           interaction.guild,
           interaction.user.id,
-          links[interaction.user.id]
+          linkEntry
         );
 
         await interaction.editReply(
@@ -315,7 +309,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.commandName === "unlink") {
-      const links = loadRankLinks();
+      const links = await loadRankLinks();
       const entry = links[interaction.user.id];
 
       if (!entry) {
@@ -326,8 +320,7 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
-      delete links[interaction.user.id];
-      saveRankLinks(links);
+      await deleteRankLink(interaction.user.id);
 
       await syncMemberRoles(client, interaction.guild, interaction.user.id, {
         profileId: null,
@@ -346,7 +339,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.commandName === "syncme") {
       await interaction.deferReply({ ephemeral: true });
 
-      const links = loadRankLinks();
+      const links = await loadRankLinks();
       const entry = links[interaction.user.id];
 
       if (!entry) {

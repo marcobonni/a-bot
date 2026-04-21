@@ -1,8 +1,9 @@
 const { ChannelType } = require("discord.js");
-const fs = require("fs");
-const path = require("path");
-
-const DATA_FILE = path.join(__dirname, "links.json");
+const {
+  ensureRankStore,
+  loadRankLinks,
+  updateRankSnapshot,
+} = require("./rankStore");
 
 const SOLO_ROLE_MAP = {
   bronze: process.env.ROLE_SOLO_BRONZE,
@@ -33,21 +34,6 @@ const RANK_IMAGE_MAP = {
 
 const SOLO_ROLE_IDS = Object.values(SOLO_ROLE_MAP).filter(Boolean);
 const TEAM_ROLE_IDS = Object.values(TEAM_ROLE_MAP).filter(Boolean);
-
-function ensureRankDataFile() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2), "utf8");
-  }
-}
-
-function loadRankLinks() {
-  ensureRankDataFile();
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-}
-
-function saveRankLinks(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
-}
 
 function normalizeRankLevel(rankLevel) {
   if (!rankLevel) return null;
@@ -342,12 +328,10 @@ async function syncMemberRoles(client, guild, discordUserId, linkEntry) {
     newTeam
   );
 
-  const links = loadRankLinks();
-  if (links[discordUserId]) {
-    links[discordUserId].lastSoloRank = newSolo;
-    links[discordUserId].lastTeamRank = newTeam;
-    saveRankLinks(links);
-  }
+  await updateRankSnapshot(discordUserId, {
+    lastSoloRank: newSolo,
+    lastTeamRank: newTeam,
+  });
 
   return snapshot;
 }
@@ -373,7 +357,7 @@ async function syncOnlyVoiceUsers(client, guild) {
   await guild.channels.fetch();
   await guild.members.fetch();
 
-  const links = loadRankLinks();
+  const links = await loadRankLinks();
   const voiceMemberIds = getVoiceMemberIds(guild);
 
   let processed = 0;
@@ -403,9 +387,8 @@ async function syncOnlyVoiceUsers(client, guild) {
 }
 
 module.exports = {
-  ensureRankDataFile,
+  ensureRankStore,
   loadRankLinks,
-  saveRankLinks,
   fetchPlayerProfile,
   searchPlayers,
   syncMemberRoles,
