@@ -77,6 +77,7 @@ function mapRowToUser(row) {
 function mapRowToSession(row) {
   return {
     channelId: row.channel_id ? String(row.channel_id) : null,
+    discordName: row.discord_name || null,
     startedAt: row.started_at,
   };
 }
@@ -149,7 +150,7 @@ async function loadVoiceSessionsFromSupabase() {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from(SUPABASE_ACTIVITY_VOICE_SESSIONS_TABLE)
-    .select("discord_user_id, channel_id, started_at");
+    .select("discord_user_id, discord_name, channel_id, started_at");
 
   if (error) {
     throw new Error(`Errore lettura Supabase activity voice sessions: ${error.message}`);
@@ -212,6 +213,7 @@ async function startVoiceSession(userId, channelId, discordName = null, startedA
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.rpc("start_activity_voice_session", {
     p_user_id: String(userId),
+    p_discord_name: discordName || null,
     p_channel_id: channelId ? String(channelId) : null,
     p_started_at: new Date(startedAt).toISOString(),
   });
