@@ -8,7 +8,16 @@ const {
   SlashCommandBuilder,
   StringSelectMenuBuilder,
 } = require("discord.js");
+const { createLogger } = require("./debug");
 const { startTwitchMonitor } = require("./twitch");
+const {
+  addYoutubeSubscriptionByInput,
+  ensureYoutubeStore,
+  formatYoutubeSubscription,
+  loadYoutubeSubscriptions,
+  removeYoutubeSubscriptionByInput,
+  startYoutubeMonitor,
+} = require("./youtube");
 const { startQueueChannelWebhookServer } = require("./queueChannelSync");
 const {
   ensureRankStore,
@@ -33,6 +42,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SEARCH_MENU_PREFIX = "select_player:";
+const logger = createLogger("index");
 
 const client = new Client({
   intents: [
@@ -43,7 +53,7 @@ const client = new Client({
 });
 
 async function registerCommands() {
-  console.log("[index] Registrazione comandi slash...");
+  logger.info("Registrazione comandi slash...");
 
   const commands = [
     new SlashCommandBuilder()
@@ -78,6 +88,38 @@ async function registerCommands() {
       .setName("syncvoice")
       .setDescription("Aggiorna i ruoli AoE4 degli utenti attualmente in vocale")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+    new SlashCommandBuilder()
+      .setName("youtube")
+      .setDescription("Gestisce i canali YouTube monitorati dal bot")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("add")
+          .setDescription("Aggiunge un canale YouTube al monitor")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link del canale, handle @nome oppure channel ID")
+              .setRequired(true)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("remove")
+          .setDescription("Rimuove un canale YouTube dal monitor")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link, handle, channel ID o nome del canale")
+              .setRequired(true)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("list")
+          .setDescription("Mostra i canali YouTube attualmente monitorati")
+      ),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -86,54 +128,54 @@ async function registerCommands() {
     body: commands,
   });
 
-  console.log("[index] Comandi slash registrati con successo");
+  logger.info("Comandi slash registrati con successo");
 }
 
 client.once("ready", async () => {
-  console.log(`[index] Bot online come ${client.user.tag}`);
-  console.log("[index] Variabili principali:");
-  console.log("[index] GUILD_ID:", GUILD_ID);
-  console.log("[index] CLIENT_ID:", CLIENT_ID);
-  console.log("[index] PORT:", process.env.PORT || 3000);
-  console.log(
-    "[index] NEATQUEUE_WEBHOOK_PATH:",
-    process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook"
-  );
-  console.log(
-    "[index] QUEUE_STATUS_CHANNEL_ID:",
-    process.env.QUEUE_STATUS_CHANNEL_ID || "(non configurato)"
-  );
+  logger.info("Bot online", {
+    tag: client.user.tag,
+    guildId: GUILD_ID,
+    clientId: CLIENT_ID,
+    port: process.env.PORT || 3000,
+    neatqueueWebhookPath: process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook",
+    queueStatusChannelId: process.env.QUEUE_STATUS_CHANNEL_ID || null,
+    debugEnabled: logger.enabled(),
+  });
 
   try {
     await ensureRankStore();
-    console.log("[index] Rank store pronto");
+    ensureYoutubeStore();
+    logger.info("Rank store pronto");
 
     const guild = await client.guilds.fetch(GUILD_ID);
     const fullGuild = await guild.fetch();
 
-    console.log("[index] Guild caricata:", {
+    logger.info("Guild caricata", {
       id: fullGuild.id,
       name: fullGuild.name,
       memberCount: fullGuild.memberCount,
     });
 
     const result = await syncOnlyVoiceUsers(client, fullGuild);
-    console.log("[index] Sync iniziale completato:", result);
+    logger.info("Sync iniziale completato", result);
 
     setInterval(async () => {
       try {
-        console.log("[index] Avvio sync orario...");
+        logger.info("Avvio sync orario...");
         const hourlyResult = await syncOnlyVoiceUsers(client, fullGuild);
-        console.log("[index] Sync orario completato:", hourlyResult);
+        logger.info("Sync orario completato", hourlyResult);
       } catch (error) {
         console.error("[index] Errore sync orario:", error);
       }
     }, SYNC_INTERVAL_MS);
 
-    console.log("[index] Avvio monitor Twitch...");
+    logger.info("Avvio monitor Twitch...");
     startTwitchMonitor(client);
 
-    console.log("[index] Avvio webhook server NeatQueue...");
+    logger.info("Avvio monitor YouTube...");
+    startYoutubeMonitor(client);
+
+    logger.info("Avvio webhook server NeatQueue...");
     startQueueChannelWebhookServer(client);
   } catch (error) {
     console.error("[index] Errore nel bootstrap del bot:", error);
@@ -142,7 +184,7 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    console.log("[index] interactionCreate:", {
+    logger.debug("interactionCreate", {
       type: interaction.type,
       isChatInputCommand: interaction.isChatInputCommand(),
       isStringSelectMenu: interaction.isStringSelectMenu(),
@@ -197,6 +239,11 @@ client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) {
       return;
     }
+
+    logger.info("Comando ricevuto", {
+      commandName: interaction.commandName,
+      userId: interaction.user?.id || null,
+    });
 
     if (interaction.commandName === "link") {
       await interaction.deferReply({ ephemeral: true });
@@ -369,6 +416,64 @@ client.on("interactionCreate", async (interaction) => {
           `Errori: **${result.errors}**`,
         ].join("\n")
       );
+      return;
+    }
+
+    if (interaction.commandName === "youtube") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const subcommand = interaction.options.getSubcommand();
+
+      if (subcommand === "add") {
+        const input = interaction.options.getString("canale", true).trim();
+        const { subscription, alreadyExists } = await addYoutubeSubscriptionByInput(input);
+
+        await interaction.editReply(
+          [
+            alreadyExists
+              ? "Canale YouTube gia monitorato. Ho aggiornato i dati salvati."
+              : "Canale YouTube aggiunto al monitor.",
+            formatYoutubeSubscription(subscription),
+            "I video gia pubblicati non verranno notificati: da ora in poi il bot mandera solo i nuovi upload.",
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (subcommand === "remove") {
+        const input = interaction.options.getString("canale", true).trim();
+        const removed = await removeYoutubeSubscriptionByInput(input);
+
+        if (!removed) {
+          await interaction.editReply("Non ho trovato un canale YouTube monitorato che corrisponda a quel valore.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            "Canale YouTube rimosso dal monitor.",
+            formatYoutubeSubscription(removed),
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (subcommand === "list") {
+        const subscriptions = loadYoutubeSubscriptions();
+
+        if (!subscriptions.length) {
+          await interaction.editReply("Nessun canale YouTube monitorato al momento.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            `Canali YouTube monitorati: **${subscriptions.length}**`,
+            subscriptions.map(formatYoutubeSubscription).join("\n"),
+          ].join("\n")
+        );
+        return;
+      }
     }
   } catch (error) {
     console.error("[index] Errore interaction completo:", error);
@@ -392,9 +497,9 @@ client.on("interactionCreate", async (interaction) => {
 
 registerCommands()
   .then(async () => {
-    console.log("[index] Login bot in corso...");
+    logger.info("Login bot in corso...");
     await client.login(TOKEN);
-    console.log("[index] Login completato");
+    logger.info("Login completato");
   })
   .catch((error) => {
     console.error("[index] Errore avvio bot:", error);

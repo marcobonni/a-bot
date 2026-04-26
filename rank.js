@@ -1,9 +1,11 @@
 const { ChannelType } = require("discord.js");
+const { createLogger } = require("./debug");
 const {
   ensureRankStore,
   loadRankLinks,
   updateRankSnapshot,
 } = require("./rankStore");
+const logger = createLogger("rank");
 
 const SOLO_ROLE_MAP = {
   bronze: process.env.ROLE_SOLO_BRONZE,
@@ -163,6 +165,10 @@ function normalizeRankLevel(rankLevel) {
 // }
 
 async function fetchJson(url, errorPrefix, options = {}) {
+  logger.debug("HTTP request", {
+    url,
+    method: options.method || "GET",
+  });
   const response = await fetch(url, options);
 
   if (!response.ok) {
@@ -174,11 +180,13 @@ async function fetchJson(url, errorPrefix, options = {}) {
 
 async function fetchPlayerProfile(profileId) {
   const url = `https://aoe4world.com/api/v0/players/${encodeURIComponent(profileId)}`;
+  logger.debug("Recupero profilo AoE4World", { profileId: String(profileId) });
   return fetchJson(url, "Errore recupero profilo AoE4World");
 }
 
 async function searchPlayers(query) {
   const url = `https://aoe4world.com/api/v0/players/search?query=${encodeURIComponent(query)}`;
+  logger.debug("Ricerca giocatori AoE4World", { query });
   const data = await fetchJson(url, "Errore ricerca giocatori AoE4World");
 
   if (Array.isArray(data)) return data;
@@ -190,6 +198,7 @@ async function searchPlayers(query) {
 
 async function fetchLeaderboardEntry(leaderboard, profileId) {
   const url = `https://aoe4world.com/api/v0/leaderboards/${leaderboard}?profile_id=${encodeURIComponent(profileId)}`;
+  logger.debug("Recupero leaderboard", { leaderboard, profileId: String(profileId) });
   const data = await fetchJson(url, `Errore leaderboard ${leaderboard}`);
 
   if (Array.isArray(data)) {
@@ -220,6 +229,7 @@ async function fetchLeaderboardEntry(leaderboard, profileId) {
 }
 
 async function getRankSnapshot(profileId) {
+  logger.debug("Creo rank snapshot", { profileId: String(profileId) });
   const [soloEntry, teamEntry] = await Promise.all([
     fetchLeaderboardEntry("rm_solo", profileId),
     fetchLeaderboardEntry("rm_team", profileId),
@@ -298,6 +308,14 @@ async function getRankEmoji(guild, type, rank) {
 async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) {
   const channelId = process.env.DISCORD_RANK_CHANNEL_ID;
   if (!channelId) return;
+
+  logger.info("Invio notifica rank up", {
+    userId,
+    type,
+    oldRank,
+    newRank,
+    channelId,
+  });
 
   const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel || typeof channel.send !== "function") return;
@@ -387,6 +405,11 @@ async function removeRankFamily(member, roleIdsToRemove, roleIdToKeep = null) {
   }
 
   if (toRemove.length > 0) {
+    logger.debug("Rimuovo ruoli rank", {
+      memberId: member.id,
+      roleIds: toRemove,
+      keepRoleId: roleIdToKeep,
+    });
     await member.roles.remove(toRemove, "Aggiornamento automatico rank AoE4");
   }
 }
@@ -412,6 +435,10 @@ async function ensureRankRole(member, roleId) {
   }
 
   if (!member.roles.cache.has(roleId)) {
+    logger.debug("Assegno ruolo rank", {
+      memberId: member.id,
+      roleId,
+    });
     await member.roles.add(roleId, "Aggiornamento automatico rank AoE4");
   }
 }
@@ -436,6 +463,12 @@ async function clearRankRoles(guild, discordUserId) {
 // }
 
 async function syncMemberRoles(client, guild, discordUserId, linkEntry) {
+  logger.info("Sync ruoli utente", {
+    discordUserId,
+    profileId: linkEntry?.profileId || null,
+    clearOnly: Boolean(linkEntry?.clearOnly),
+  });
+
   if (linkEntry?.clearOnly) {
     await clearRankRoles(guild, discordUserId);
     return {
@@ -455,6 +488,16 @@ async function syncMemberRoles(client, guild, discordUserId, linkEntry) {
 
   const soloRoleId = newSolo ? SOLO_ROLE_MAP[newSolo] : null;
   const teamRoleId = newTeam ? TEAM_ROLE_MAP[newTeam] : null;
+
+  logger.debug("Snapshot ruoli calcolato", {
+    discordUserId,
+    oldSolo,
+    newSolo,
+    oldTeam,
+    newTeam,
+    soloRoleId,
+    teamRoleId,
+  });
 
   await removeRankFamily(member, SOLO_ROLE_IDS, soloRoleId);
   await removeRankFamily(member, TEAM_ROLE_IDS, teamRoleId);
@@ -509,6 +552,11 @@ async function syncOnlyVoiceUsers(client, guild) {
   const links = await loadRankLinks();
   const voiceMemberIds = getVoiceMemberIds(guild);
 
+  logger.info("Sync utenti vocali avviato", {
+    guildId: guild.id,
+    voiceUsers: voiceMemberIds.size,
+  });
+
   let processed = 0;
   let updated = 0;
   let skipped = 0;
@@ -531,6 +579,13 @@ async function syncOnlyVoiceUsers(client, guild) {
       console.error(`Errore sync utente ${memberId}:`, error.message);
     }
   }
+
+  logger.info("Sync utenti vocali completato", {
+    processed,
+    updated,
+    skipped,
+    errors,
+  });
 
   return { processed, updated, skipped, errors };
 }

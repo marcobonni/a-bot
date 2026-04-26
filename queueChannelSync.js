@@ -1,4 +1,5 @@
 const http = require("http");
+const { createLogger } = require("./debug");
 
 const PORT = Number(process.env.PORT || 3000);
 const RAW_WEBHOOK_PATH = process.env.NEATQUEUE_WEBHOOK_PATH || "/neatqueue/webhook";
@@ -14,6 +15,7 @@ const QUEUE_VOICE_ACTIVE_NAME = process.env.QUEUE_VOICE_ACTIVE_NAME || "zozza-in
 
 const NEATQUEUE_QUEUE_NAME = process.env.NEATQUEUE_QUEUE_NAME || "";
 const RENAME_DEBOUNCE_MS = Number(process.env.RENAME_DEBOUNCE_MS || 5000);
+const logger = createLogger("queueChannelSync");
 
 let started = false;
 let renameTimer = null;
@@ -58,7 +60,7 @@ function normalizeActionName(action) {
 
 function shouldHandleQueue(payload) {
   if (!NEATQUEUE_QUEUE_NAME) {
-    console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME non configurato: accetto tutti gli eventi.");
+    logger.info("NEATQUEUE_QUEUE_NAME non configurato: accetto tutti gli eventi.");
     return true;
   }
 
@@ -78,9 +80,11 @@ function shouldHandleQueue(payload) {
   const wantedQueue = normalizeQueueName(NEATQUEUE_QUEUE_NAME);
   const match = payloadQueueCandidates.includes(wantedQueue);
 
-  console.log("[queueChannelSync] Queue configurata:", wantedQueue);
-  console.log("[queueChannelSync] Queue trovate nel payload:", payloadQueueCandidates);
-  console.log("[queueChannelSync] Match queue:", match);
+  logger.debug("Confronto queue webhook", {
+    wantedQueue,
+    payloadQueueCandidates,
+    match,
+  });
 
   return match;
 }
@@ -215,9 +219,10 @@ async function renameChannelById(client, channelId, nextName, reason) {
 }
 
 async function renameQueueChannel(client, count) {
-  console.log("[queueChannelSync] renameQueueChannel avviato");
-  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
-  console.log("[queueChannelSync] Count richiesto:", count);
+  logger.info("renameQueueChannel avviato", {
+    channelId: QUEUE_STATUS_CHANNEL_ID,
+    count,
+  });
 
   if (!QUEUE_STATUS_CHANNEL_ID) {
     console.warn("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID non configurato.");
@@ -257,9 +262,11 @@ async function renameVoiceStatusChannel(client, isActive) {
 }
 
 async function setMatchState(client, nextState, action) {
-  console.log("[queueChannelSync] Stato match attuale:", matchInProgress);
-  console.log("[queueChannelSync] Nuovo stato match richiesto:", nextState);
-  console.log("[queueChannelSync] Action che ha causato il cambio:", action || "(vuota)");
+  logger.info("Cambio stato match richiesto", {
+    current: matchInProgress,
+    next: nextState,
+    action: action || null,
+  });
 
   if (matchInProgress === nextState) {
     console.log("[queueChannelSync] Stato match invariato. Nessun rename vocale necessario.");
@@ -271,9 +278,11 @@ async function setMatchState(client, nextState, action) {
 }
 
 function scheduleRename(client, count) {
-  console.log("[queueChannelSync] scheduleRename chiamato con count:", count);
-  console.log("[queueChannelSync] lastAppliedCount:", lastAppliedCount);
-  console.log("[queueChannelSync] pendingCount precedente:", pendingCount);
+  logger.debug("scheduleRename chiamato", {
+    count,
+    lastAppliedCount,
+    pendingCount,
+  });
 
   pendingCount = count;
 
@@ -283,9 +292,10 @@ function scheduleRename(client, count) {
   }
 
   renameTimer = setTimeout(async () => {
-    console.log("[queueChannelSync] Timer rename scattato");
-    console.log("[queueChannelSync] pendingCount:", pendingCount);
-    console.log("[queueChannelSync] lastAppliedCount:", lastAppliedCount);
+    logger.debug("Timer rename scattato", {
+      pendingCount,
+      lastAppliedCount,
+    });
 
     try {
       if (pendingCount === null) {
@@ -332,11 +342,11 @@ function sendJson(res, statusCode, payload) {
 }
 
 async function handleWebhook(req, res, client) {
-  console.log("==================================================");
-  console.log("[queueChannelSync] WEBHOOK RICEVUTO");
-  console.log("[queueChannelSync] Method:", req.method);
-  console.log("[queueChannelSync] URL:", req.url);
-  console.log("[queueChannelSync] Headers:", req.headers);
+  logger.info("Webhook ricevuto", {
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+  });
 
   if (!NEATQUEUE_WEBHOOK_TOKEN) {
     console.error("[queueChannelSync] NEATQUEUE_WEBHOOK_TOKEN non configurato");
@@ -345,8 +355,10 @@ async function handleWebhook(req, res, client) {
   }
 
   const authHeader = req.headers.authorization || "";
-  console.log("[queueChannelSync] Authorization ricevuto:", authHeader);
-  console.log("[queueChannelSync] Authorization atteso:", NEATQUEUE_WEBHOOK_TOKEN);
+  logger.debug("Verifica authorization webhook", {
+    received: authHeader,
+    expected: NEATQUEUE_WEBHOOK_TOKEN,
+  });
 
   if (authHeader !== NEATQUEUE_WEBHOOK_TOKEN) {
     console.warn("[queueChannelSync] Authorization non valida");
@@ -359,7 +371,7 @@ async function handleWebhook(req, res, client) {
 
   try {
     rawBody = await collectRawBody(req);
-    console.log("[queueChannelSync] Raw body:", rawBody);
+    logger.debug("Raw body webhook", { rawBody });
     payload = JSON.parse(rawBody || "{}");
   } catch (error) {
     console.error("[queueChannelSync] Errore parsing JSON:", error);
@@ -367,15 +379,17 @@ async function handleWebhook(req, res, client) {
     return;
   }
 
-  console.log("[queueChannelSync] Payload parsato:", payload);
+  logger.debug("Payload webhook parsato", payload);
 
   const action = extractAction(payload);
   const players = extractPlayersArray(payload);
   const count = extractCount(payload, action);
 
-  console.log("[queueChannelSync] Action estratta:", action || "(vuota)");
-  console.log("[queueChannelSync] Players estratti:", players);
-  console.log("[queueChannelSync] Count estratto:", count);
+  logger.info("Webhook interpretato", {
+    action: action || null,
+    playersCount: players.length,
+    count,
+  });
 
   if (!shouldHandleQueue(payload)) {
     console.log("[queueChannelSync] Evento ignorato: queue non corrispondente");
@@ -415,14 +429,16 @@ function startQueueChannelWebhookServer(client) {
     return;
   }
 
-  console.log("[queueChannelSync] Avvio webhook server...");
-  console.log("[queueChannelSync] PORT:", PORT);
-  console.log("[queueChannelSync] NEATQUEUE_WEBHOOK_PATH:", NEATQUEUE_WEBHOOK_PATH);
-  console.log("[queueChannelSync] QUEUE_STATUS_CHANNEL_ID:", QUEUE_STATUS_CHANNEL_ID);
-  console.log("[queueChannelSync] QUEUE_VOICE_CHANNEL_ID:", QUEUE_VOICE_CHANNEL_ID || "(non configurato)");
-  console.log("[queueChannelSync] QUEUE_CHANNEL_NAME_PREFIX:", QUEUE_CHANNEL_NAME_PREFIX);
-  console.log("[queueChannelSync] NEATQUEUE_QUEUE_NAME:", NEATQUEUE_QUEUE_NAME || "(tutte)");
-  console.log("[queueChannelSync] RENAME_DEBOUNCE_MS:", RENAME_DEBOUNCE_MS);
+  logger.info("Avvio webhook server", {
+    port: PORT,
+    webhookPath: NEATQUEUE_WEBHOOK_PATH,
+    queueStatusChannelId: QUEUE_STATUS_CHANNEL_ID,
+    queueVoiceChannelId: QUEUE_VOICE_CHANNEL_ID || null,
+    queueChannelNamePrefix: QUEUE_CHANNEL_NAME_PREFIX,
+    neatqueueQueueName: NEATQUEUE_QUEUE_NAME || null,
+    renameDebounceMs: RENAME_DEBOUNCE_MS,
+    debugEnabled: logger.enabled(),
+  });
 
   const server = http.createServer(async (req, res) => {
     try {

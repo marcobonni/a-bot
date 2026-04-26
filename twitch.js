@@ -1,20 +1,28 @@
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
 const DISCORD_LIVE_CHANNEL_ID = process.env.DISCORD_LIVE_CHANNEL_ID;
+const { createLogger } = require("./debug");
 const TWITCH_STREAMERS = (process.env.TWITCH_STREAMERS || "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
 
 const TWITCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
+const AGERS_ROLE_NAME = "Agers";
+const AGERS_PING_STREAMERS = new Set(["aoe4italia_legacy"]);
+const logger = createLogger("twitch");
 
 let twitchAccessToken = null;
 let twitchAccessTokenExpiresAt = 0;
 
 const liveStatusCache = new Map();
-const liveMessages = new Map(); // 🔥 NEW → salva messageId per streamer
+const liveMessages = new Map(); // Salva messageId per streamer.
 
 async function fetchJson(url, errorPrefix, options = {}) {
+  logger.debug("HTTP request", {
+    url,
+    method: options.method || "GET",
+  });
   const response = await fetch(url, options);
 
   if (!response.ok) {
@@ -28,6 +36,7 @@ async function getTwitchAppAccessToken() {
   const now = Date.now();
 
   if (twitchAccessToken && now < twitchAccessTokenExpiresAt - 60_000) {
+    logger.debug("Riutilizzo token Twitch in cache");
     return twitchAccessToken;
   }
 
@@ -55,12 +64,17 @@ async function getTwitchAppAccessToken() {
 
   twitchAccessToken = data.access_token;
   twitchAccessTokenExpiresAt = Date.now() + data.expires_in * 1000;
+  logger.debug("Nuovo token Twitch ottenuto", {
+    expiresInSeconds: data.expires_in,
+  });
 
   return twitchAccessToken;
 }
 
 async function getLiveStreamsByLogins(logins) {
   if (!logins.length) return [];
+
+  logger.debug("Controllo streamer Twitch", { logins });
 
   const token = await getTwitchAppAccessToken();
 
@@ -83,18 +97,54 @@ async function getLiveStreamsByLogins(logins) {
   return data.data || [];
 }
 
-function buildTwitchLiveMessage(stream) {
-  return `🔴 **${stream.user_name} è LIVE!**\nhttps://twitch.tv/${stream.user_login}`;
+function shouldPingAgers(stream) {
+  return AGERS_PING_STREAMERS.has(stream.user_login.toLowerCase());
+}
+
+async function getAgersRoleMention(channel) {
+  const guild = channel.guild;
+
+  if (!guild) {
+    return "";
+  }
+
+  if (guild.roles.cache.size === 0) {
+    await guild.roles.fetch();
+  }
+
+  const agersRole = guild.roles.cache.find(
+    (role) => role.name.toLowerCase() === AGERS_ROLE_NAME.toLowerCase()
+  );
+
+  logger.debug("Lookup ruolo Agers", {
+    found: Boolean(agersRole),
+    guildId: guild.id,
+  });
+
+  return agersRole ? `<@&${agersRole.id}>` : "";
+}
+
+function buildTwitchLiveMessage(stream, roleMention = "") {
+  const prefix = roleMention ? `${roleMention}\n` : "";
+  return `${prefix}🔴 **${stream.user_name} è LIVE!**\nhttps://twitch.tv/${stream.user_login}`;
 }
 
 async function notifyDiscordLive(client, stream) {
   const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
+  const roleMention = shouldPingAgers(stream)
+    ? await getAgersRoleMention(channel)
+    : "";
 
-  const message = await channel.send({
-    content: buildTwitchLiveMessage(stream),
+  logger.info("Invio messaggio live", {
+    streamer: stream.user_login,
+    pingAgers: Boolean(roleMention),
+    channelId: channel?.id || null,
   });
 
-  // 🔥 salva messageId
+  const message = await channel.send({
+    content: buildTwitchLiveMessage(stream, roleMention),
+  });
+
   liveMessages.set(stream.user_login.toLowerCase(), message.id);
 }
 
@@ -102,6 +152,8 @@ async function removeDiscordLiveMessage(client, streamer) {
   const messageId = liveMessages.get(streamer);
 
   if (!messageId) return;
+
+  logger.debug("Rimozione messaggio live", { streamer, messageId });
 
   try {
     const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
@@ -120,6 +172,10 @@ async function removeDiscordLiveMessage(client, streamer) {
 async function pollTwitchLives(client) {
   if (!TWITCH_STREAMERS.length) return;
 
+  logger.debug("Poll Twitch avviato", {
+    monitored: TWITCH_STREAMERS,
+  });
+
   const liveStreams = await getLiveStreamsByLogins(TWITCH_STREAMERS);
 
   const currentlyLive = new Set(
@@ -131,19 +187,19 @@ async function pollTwitchLives(client) {
     const wasLive = liveStatusCache.get(key) === true;
     const isLive = currentlyLive.has(key);
 
-    // 🔴 VA LIVE
     if (!wasLive && isLive) {
       const stream = liveStreams.find(
-        (s) => s.user_login.toLowerCase() === key
+        (candidate) => candidate.user_login.toLowerCase() === key
       );
 
       if (stream) {
+        logger.info("Streamer rilevato live", { streamer: key });
         await notifyDiscordLive(client, stream);
       }
     }
 
-    // ⚫ VA OFFLINE
     if (wasLive && !isLive) {
+      logger.info("Streamer rilevato offline", { streamer: key });
       await removeDiscordLiveMessage(client, key);
     }
 
@@ -161,6 +217,12 @@ function startTwitchMonitor(client) {
     console.log("Monitor Twitch disattivato: nessuno streamer.");
     return;
   }
+
+  logger.info("Monitor Twitch attivo", {
+    intervalMs: TWITCH_POLL_INTERVAL_MS,
+    streamers: TWITCH_STREAMERS,
+    debugEnabled: logger.enabled(),
+  });
 
   pollTwitchLives(client).catch(console.error);
 

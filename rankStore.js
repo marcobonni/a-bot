@@ -1,10 +1,12 @@
 const fs = require("fs");
 const path = require("path");
+const { createLogger } = require("./debug");
 
 const DATA_FILE = path.join(__dirname, "links.json");
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_PLAYERS_TABLE = process.env.SUPABASE_PLAYERS_TABLE || "rank_links";
+const logger = createLogger("rankStore");
 
 function hasSupabaseConfig() {
   return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
@@ -12,6 +14,7 @@ function hasSupabaseConfig() {
 
 function ensureLocalDataFile() {
   if (!fs.existsSync(DATA_FILE)) {
+    logger.info("Creo links.json locale", { path: DATA_FILE });
     fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2), "utf8");
   }
 }
@@ -38,11 +41,15 @@ let supabaseClient = null;
 
 function getSupabaseClient() {
   if (!hasSupabaseConfig()) {
+    logger.debug("Supabase non configurato, uso storage locale");
     return null;
   }
 
   if (!supabaseClient) {
     const { createClient } = require("@supabase/supabase-js");
+    logger.info("Inizializzo client Supabase", {
+      table: SUPABASE_PLAYERS_TABLE,
+    });
     supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: {
         autoRefreshToken: false,
@@ -77,28 +84,31 @@ function mapEntryToRow(discordUserId, entry) {
 
 async function ensureRankStore() {
   if (hasSupabaseConfig()) {
-    console.log(`[rankStore] Supabase attivo, tabella: ${SUPABASE_PLAYERS_TABLE}`);
+    logger.info("Supabase attivo", { table: SUPABASE_PLAYERS_TABLE });
     if (hasLocalLinksToMigrate()) {
-      console.log("[rankStore] Trovato links.json locale: provo migrazione verso Supabase.");
+      logger.info("Trovato links.json locale, avvio migrazione");
       const localLinks = loadLocalLinks();
       for (const [discordUserId, entry] of Object.entries(localLinks)) {
         await upsertRankLink(discordUserId, entry);
       }
-      console.log("[rankStore] Migrazione locale -> Supabase completata.");
+      logger.info("Migrazione locale -> Supabase completata");
     }
     return;
   }
 
   ensureLocalDataFile();
-  console.warn("[rankStore] SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY mancanti: uso links.json locale.");
+  logger.warn("SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY mancanti: uso links.json locale.");
 }
 
 async function loadRankLinks() {
   const supabase = getSupabaseClient();
 
   if (!supabase) {
+    logger.debug("Carico rank links dal file locale");
     return loadLocalLinks();
   }
+
+  logger.debug("Carico rank links da Supabase");
 
   const { data, error } = await supabase
     .from(SUPABASE_PLAYERS_TABLE)
@@ -120,6 +130,9 @@ async function saveRankLinks(data) {
   const supabase = getSupabaseClient();
 
   if (!supabase) {
+    logger.debug("Salvo rank links nel file locale", {
+      entries: Object.keys(data).length,
+    });
     saveLocalLinks(data);
     return;
   }
@@ -158,6 +171,12 @@ async function saveRankLinks(data) {
 async function upsertRankLink(discordUserId, entry) {
   const supabase = getSupabaseClient();
 
+  logger.debug("Upsert rank link", {
+    discordUserId: String(discordUserId),
+    profileId: entry.profileId ? String(entry.profileId) : null,
+    storage: supabase ? "supabase" : "local",
+  });
+
   if (!supabase) {
     const links = loadLocalLinks();
     links[String(discordUserId)] = {
@@ -188,6 +207,11 @@ async function upsertRankLink(discordUserId, entry) {
 async function deleteRankLink(discordUserId) {
   const supabase = getSupabaseClient();
 
+  logger.debug("Delete rank link", {
+    discordUserId: String(discordUserId),
+    storage: supabase ? "supabase" : "local",
+  });
+
   if (!supabase) {
     const links = loadLocalLinks();
     delete links[String(discordUserId)];
@@ -207,6 +231,12 @@ async function deleteRankLink(discordUserId) {
 
 async function updateRankSnapshot(discordUserId, snapshot) {
   const supabase = getSupabaseClient();
+
+  logger.debug("Aggiorno snapshot rank", {
+    discordUserId: String(discordUserId),
+    snapshot,
+    storage: supabase ? "supabase" : "local",
+  });
 
   if (!supabase) {
     const links = loadLocalLinks();
