@@ -190,12 +190,18 @@ async function registerCommands() {
   logger.info("Comandi slash registrati con successo");
 }
 
-function isTrackableVoiceChannel(channel, guild) {
+function isTrackableVoiceState(voiceState, guild) {
+  const channel = voiceState?.channel;
+
   if (!channel) {
     return false;
   }
 
   if (guild?.afkChannelId && channel.id === guild.afkChannelId) {
+    return false;
+  }
+
+  if (voiceState.selfMute) {
     return false;
   }
 
@@ -208,6 +214,7 @@ function formatPointsSummary(stats, userLabel) {
     `Messaggi conteggiati: **${stats.messageCount}** (${MESSAGE_POINTS} punti ciascuno)`,
     `Tempo in vocale conteggiato: **${stats.voiceMinutes} minuti**`,
     `Regola vocale: **${VOICE_POINTS_PER_INTERVAL}** punto/i ogni **${VOICE_INTERVAL_MINUTES}** minuti`,
+    `I minuti in vocale non vengono conteggiati mentre sei in **self mute**.`,
   ].join("\n");
 }
 
@@ -240,7 +247,7 @@ client.once("ready", async () => {
     await fullGuild.members.fetch();
     const activeVoiceEntries = [];
     for (const member of fullGuild.members.cache.values()) {
-      if (isTrackableVoiceChannel(member.voice?.channel, fullGuild)) {
+      if (isTrackableVoiceState(member.voice, fullGuild)) {
         activeVoiceEntries.push({
           userId: member.id,
           channelId: member.voice.channel.id,
@@ -300,8 +307,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       return;
     }
 
-    const oldTrackable = isTrackableVoiceChannel(oldState.channel, guild);
-    const newTrackable = isTrackableVoiceChannel(newState.channel, guild);
+    const oldTrackable = isTrackableVoiceState(oldState, guild);
+    const newTrackable = isTrackableVoiceState(newState, guild);
 
     if (!oldTrackable && newTrackable) {
       await startVoiceSession(newState.id, newState.channel.id);

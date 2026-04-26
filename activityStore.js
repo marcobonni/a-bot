@@ -79,6 +79,31 @@ function mapRowToSession(row) {
   };
 }
 
+async function ensureUserRecord(userId) {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from(SUPABASE_ACTIVITY_TABLE)
+    .upsert(
+      {
+        discord_user_id: String(userId),
+        points: 0,
+        message_count: 0,
+        voice_ms: 0,
+        voice_sessions: 0,
+      },
+      { onConflict: "discord_user_id" }
+    )
+    .select("discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at")
+    .single();
+
+  if (error) {
+    throw new Error(`Errore creazione record activity points: ${error.message}`);
+  }
+
+  runtimeState.users[String(userId)] = mapRowToUser(data);
+  return runtimeState.users[String(userId)];
+}
+
 function getActiveVoiceMs(userId, now = Date.now()) {
   const session = runtimeState.activeVoiceSessions[String(userId)];
 
@@ -193,7 +218,7 @@ async function startVoiceSession(userId, channelId, startedAt = Date.now()) {
   }
 
   runtimeState.activeVoiceSessions[String(userId)] = mapRowToSession(row);
-  ensureRuntimeUser(userId);
+  await ensureUserRecord(userId);
   return runtimeState.activeVoiceSessions[String(userId)];
 }
 
