@@ -19,6 +19,10 @@ const runtimeState = {
 
 let supabaseClient = null;
 let storeReady = false;
+let supportsActivityPointsDiscordName = true;
+let supportsVoiceSessionsDiscordName = true;
+let supportsIncrementActivityMessageDiscordName = true;
+let supportsStartActivityVoiceSessionDiscordName = true;
 
 function roundPoints(value) {
   return Math.round((Number(value) + Number.EPSILON) * 10) / 10;
@@ -84,23 +88,38 @@ function mapRowToSession(row) {
 
 async function ensureUserRecord(userId, discordName = null) {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase
+  const basePayload = {
+    discord_user_id: String(userId),
+    points: 0,
+    message_count: 0,
+    voice_ms: 0,
+    voice_sessions: 0,
+  };
+
+  let payload = { ...basePayload };
+  let selectQuery =
+    "discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at";
+
+  if (supportsActivityPointsDiscordName) {
+    payload.discord_name = discordName || null;
+    selectQuery =
+      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at";
+  }
+
+  let { data, error } = await supabase
     .from(SUPABASE_ACTIVITY_TABLE)
-    .upsert(
-      {
-        discord_user_id: String(userId),
-        discord_name: discordName || null,
-        points: 0,
-        message_count: 0,
-        voice_ms: 0,
-        voice_sessions: 0,
-      },
-      { onConflict: "discord_user_id" }
-    )
-    .select(
-      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at"
-    )
+    .upsert(payload, { onConflict: "discord_user_id" })
+    .select(selectQuery)
     .single();
+
+  if (error && supportsActivityPointsDiscordName && isMissingColumnError(error, "discord_name")) {
+    supportsActivityPointsDiscordName = false;
+    ({ data, error } = await supabase
+      .from(SUPABASE_ACTIVITY_TABLE)
+      .upsert(basePayload, { onConflict: "discord_user_id" })
+      .select("discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at")
+      .single());
+  }
 
   if (error) {
     throw new Error(`Errore creazione record activity points: ${error.message}`);
@@ -128,13 +147,41 @@ function calculateVoicePoints(voiceMs) {
   return roundPoints((voiceMs / VOICE_INTERVAL_MS) * VOICE_POINTS_PER_INTERVAL);
 }
 
+function isMissingColumnError(error, columnName) {
+  return (
+    Boolean(error?.message) &&
+    error.message.includes("column") &&
+    error.message.includes(columnName) &&
+    error.message.includes("does not exist")
+  );
+}
+
+function isRpcSignatureError(error, functionName) {
+  return (
+    Boolean(error?.message) &&
+    error.message.includes(functionName) &&
+    (error.message.includes("function") || error.message.includes("does not exist"))
+  );
+}
+
 async function loadUsersFromSupabase() {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from(SUPABASE_ACTIVITY_TABLE)
-    .select(
-      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at"
-    );
+  let query =
+    "discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at";
+
+  if (supportsActivityPointsDiscordName) {
+    query =
+      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at";
+  }
+
+  let { data, error } = await supabase.from(SUPABASE_ACTIVITY_TABLE).select(query);
+
+  if (error && supportsActivityPointsDiscordName && isMissingColumnError(error, "discord_name")) {
+    supportsActivityPointsDiscordName = false;
+    ({ data, error } = await supabase
+      .from(SUPABASE_ACTIVITY_TABLE)
+      .select("discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at"));
+  }
 
   if (error) {
     throw new Error(`Errore lettura Supabase activity points: ${error.message}`);
@@ -148,9 +195,22 @@ async function loadUsersFromSupabase() {
 
 async function loadVoiceSessionsFromSupabase() {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase
+  let query = "discord_user_id, channel_id, started_at";
+
+  if (supportsVoiceSessionsDiscordName) {
+    query = "discord_user_id, discord_name, channel_id, started_at";
+  }
+
+  let { data, error } = await supabase
     .from(SUPABASE_ACTIVITY_VOICE_SESSIONS_TABLE)
-    .select("discord_user_id, discord_name, channel_id, started_at");
+    .select(query);
+
+  if (error && supportsVoiceSessionsDiscordName && isMissingColumnError(error, "discord_name")) {
+    supportsVoiceSessionsDiscordName = false;
+    ({ data, error } = await supabase
+      .from(SUPABASE_ACTIVITY_VOICE_SESSIONS_TABLE)
+      .select("discord_user_id, channel_id, started_at"));
+  }
 
   if (error) {
     throw new Error(`Errore lettura Supabase activity voice sessions: ${error.message}`);
@@ -190,11 +250,28 @@ async function ensureActivityStore() {
 
 async function addMessagePoints(userId, discordName = null) {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase.rpc("increment_activity_message", {
+  let payload = {
     p_user_id: String(userId),
-    p_discord_name: discordName || null,
     p_points: MESSAGE_POINTS,
-  });
+  };
+
+  if (supportsIncrementActivityMessageDiscordName) {
+    payload.p_discord_name = discordName || null;
+  }
+
+  let { data, error } = await supabase.rpc("increment_activity_message", payload);
+
+  if (
+    error &&
+    supportsIncrementActivityMessageDiscordName &&
+    isRpcSignatureError(error, "increment_activity_message")
+  ) {
+    supportsIncrementActivityMessageDiscordName = false;
+    ({ data, error } = await supabase.rpc("increment_activity_message", {
+      p_user_id: String(userId),
+      p_points: MESSAGE_POINTS,
+    }));
+  }
 
   if (error) {
     throw new Error(`Errore incremento punti messaggio: ${error.message}`);
@@ -211,12 +288,30 @@ async function addMessagePoints(userId, discordName = null) {
 
 async function startVoiceSession(userId, channelId, discordName = null, startedAt = Date.now()) {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase.rpc("start_activity_voice_session", {
+  let payload = {
     p_user_id: String(userId),
-    p_discord_name: discordName || null,
     p_channel_id: channelId ? String(channelId) : null,
     p_started_at: new Date(startedAt).toISOString(),
-  });
+  };
+
+  if (supportsStartActivityVoiceSessionDiscordName) {
+    payload.p_discord_name = discordName || null;
+  }
+
+  let { data, error } = await supabase.rpc("start_activity_voice_session", payload);
+
+  if (
+    error &&
+    supportsStartActivityVoiceSessionDiscordName &&
+    isRpcSignatureError(error, "start_activity_voice_session")
+  ) {
+    supportsStartActivityVoiceSessionDiscordName = false;
+    ({ data, error } = await supabase.rpc("start_activity_voice_session", {
+      p_user_id: String(userId),
+      p_channel_id: channelId ? String(channelId) : null,
+      p_started_at: new Date(startedAt).toISOString(),
+    }));
+  }
 
   if (error) {
     throw new Error(`Errore apertura sessione vocale: ${error.message}`);

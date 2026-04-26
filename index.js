@@ -249,6 +249,9 @@ client.once("ready", async () => {
     await ensureActivityStore();
     logger.info("Rank store pronto");
 
+    logger.info("Avvio webhook server NeatQueue...");
+    startQueueChannelWebhookServer(client);
+
     const guild = await client.guilds.fetch(GUILD_ID);
     const fullGuild = await guild.fetch();
 
@@ -258,7 +261,15 @@ client.once("ready", async () => {
       memberCount: fullGuild.memberCount,
     });
 
-    await fullGuild.members.fetch();
+    try {
+      await fullGuild.members.fetch();
+    } catch (error) {
+      console.error("[index] Errore fetch completo membri guild:", error);
+      console.warn(
+        "[index] Continuo il bootstrap senza member fetch completo; usero la cache disponibile."
+      );
+    }
+
     const activeVoiceEntries = [];
     for (const member of fullGuild.members.cache.values()) {
       if (isTrackableVoiceState(member.voice, fullGuild)) {
@@ -290,9 +301,6 @@ client.once("ready", async () => {
 
     logger.info("Avvio monitor YouTube...");
     startYoutubeMonitor(client);
-
-    logger.info("Avvio webhook server NeatQueue...");
-    startQueueChannelWebhookServer(client);
 
     logger.info("Avvio reporter inattivita giornaliero...");
     await startDailyInactivityReporter(client);
