@@ -51,6 +51,7 @@ function ensureRuntimeUser(userId) {
 
   if (!runtimeState.users[key]) {
     runtimeState.users[key] = {
+      discordName: null,
       points: 0,
       messageCount: 0,
       voiceMs: 0,
@@ -64,6 +65,7 @@ function ensureRuntimeUser(userId) {
 
 function mapRowToUser(row) {
   return {
+    discordName: row.discord_name || null,
     points: Number(row.points || 0),
     messageCount: Number(row.message_count || 0),
     voiceMs: Number(row.voice_ms || 0),
@@ -79,13 +81,14 @@ function mapRowToSession(row) {
   };
 }
 
-async function ensureUserRecord(userId) {
+async function ensureUserRecord(userId, discordName = null) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from(SUPABASE_ACTIVITY_TABLE)
     .upsert(
       {
         discord_user_id: String(userId),
+        discord_name: discordName || null,
         points: 0,
         message_count: 0,
         voice_ms: 0,
@@ -93,7 +96,9 @@ async function ensureUserRecord(userId) {
       },
       { onConflict: "discord_user_id" }
     )
-    .select("discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at")
+    .select(
+      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at"
+    )
     .single();
 
   if (error) {
@@ -126,7 +131,9 @@ async function loadUsersFromSupabase() {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from(SUPABASE_ACTIVITY_TABLE)
-    .select("discord_user_id, points, message_count, voice_ms, voice_sessions, created_at, updated_at");
+    .select(
+      "discord_user_id, discord_name, points, message_count, voice_ms, voice_sessions, created_at, updated_at"
+    );
 
   if (error) {
     throw new Error(`Errore lettura Supabase activity points: ${error.message}`);
@@ -180,10 +187,11 @@ async function ensureActivityStore() {
   });
 }
 
-async function addMessagePoints(userId) {
+async function addMessagePoints(userId, discordName = null) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.rpc("increment_activity_message", {
     p_user_id: String(userId),
+    p_discord_name: discordName || null,
     p_points: MESSAGE_POINTS,
   });
 
@@ -200,7 +208,7 @@ async function addMessagePoints(userId) {
   return getUserStats(userId);
 }
 
-async function startVoiceSession(userId, channelId, startedAt = Date.now()) {
+async function startVoiceSession(userId, channelId, discordName = null, startedAt = Date.now()) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.rpc("start_activity_voice_session", {
     p_user_id: String(userId),
@@ -218,7 +226,7 @@ async function startVoiceSession(userId, channelId, startedAt = Date.now()) {
   }
 
   runtimeState.activeVoiceSessions[String(userId)] = mapRowToSession(row);
-  await ensureUserRecord(userId);
+  await ensureUserRecord(userId, discordName);
   return runtimeState.activeVoiceSessions[String(userId)];
 }
 
@@ -253,9 +261,7 @@ async function endVoiceSession(userId, endedAt = Date.now()) {
 
 async function reconcileActiveVoiceSessions(activeVoiceEntries) {
   const now = Date.now();
-  const actualMap = new Map(
-    activeVoiceEntries.map((entry) => [String(entry.userId), String(entry.channelId)])
-  );
+  const actualMap = new Map(activeVoiceEntries.map((entry) => [String(entry.userId), entry]));
 
   for (const userId of Object.keys(runtimeState.activeVoiceSessions)) {
     if (!actualMap.has(userId)) {
@@ -263,17 +269,26 @@ async function reconcileActiveVoiceSessions(activeVoiceEntries) {
     }
   }
 
-  for (const [userId, channelId] of actualMap.entries()) {
+  for (const [userId, entry] of actualMap.entries()) {
+    const channelId = String(entry.channelId);
     const existingSession = runtimeState.activeVoiceSessions[userId];
 
     if (!existingSession) {
-      await startVoiceSession(userId, channelId, now);
+      await startVoiceSession(userId, channelId, entry.discordName || null, now);
       continue;
     }
 
     if (existingSession.channelId !== channelId) {
-      await startVoiceSession(userId, channelId, new Date(existingSession.startedAt).getTime());
+      await startVoiceSession(
+        userId,
+        channelId,
+        entry.discordName || null,
+        new Date(existingSession.startedAt).getTime()
+      );
+      continue;
     }
+
+    await ensureUserRecord(userId, entry.discordName || null);
   }
 }
 

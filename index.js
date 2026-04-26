@@ -38,6 +38,10 @@ const {
   startVoiceSession,
 } = require("./activityStore");
 const {
+  handlePresenceUpdate,
+  startDailyInactivityReporter,
+} = require("./dailyInactivityReporter");
+const {
   ensureRankStore,
   loadRankLinks,
   fetchPlayerProfile,
@@ -67,6 +71,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
@@ -218,6 +223,15 @@ function formatPointsSummary(stats, userLabel) {
   ].join("\n");
 }
 
+function getDiscordDisplayName(memberOrUser) {
+  return (
+    memberOrUser?.displayName ||
+    memberOrUser?.globalName ||
+    memberOrUser?.username ||
+    null
+  );
+}
+
 client.once("ready", async () => {
   logger.info("Bot online", {
     tag: client.user.tag,
@@ -251,6 +265,7 @@ client.once("ready", async () => {
         activeVoiceEntries.push({
           userId: member.id,
           channelId: member.voice.channel.id,
+          discordName: getDiscordDisplayName(member),
         });
       }
     }
@@ -278,6 +293,9 @@ client.once("ready", async () => {
 
     logger.info("Avvio webhook server NeatQueue...");
     startQueueChannelWebhookServer(client);
+
+    logger.info("Avvio reporter inattivita giornaliero...");
+    await startDailyInactivityReporter(client);
   } catch (error) {
     console.error("[index] Errore nel bootstrap del bot:", error);
   }
@@ -293,7 +311,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    await addMessagePoints(message.author.id);
+    await addMessagePoints(message.author.id, getDiscordDisplayName(message.member || message.author));
   } catch (error) {
     console.error("[index] Errore tracking messaggi:", error);
   }
@@ -311,7 +329,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const newTrackable = isTrackableVoiceState(newState, guild);
 
     if (!oldTrackable && newTrackable) {
-      await startVoiceSession(newState.id, newState.channel.id);
+      await startVoiceSession(
+        newState.id,
+        newState.channel.id,
+        getDiscordDisplayName(newState.member || newState.guild?.members?.cache.get(newState.id))
+      );
       return;
     }
 
@@ -321,10 +343,22 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     }
 
     if (oldTrackable && newTrackable && oldState.channelId !== newState.channelId) {
-      await startVoiceSession(newState.id, newState.channel.id);
+      await startVoiceSession(
+        newState.id,
+        newState.channel.id,
+        getDiscordDisplayName(newState.member || newState.guild?.members?.cache.get(newState.id))
+      );
     }
   } catch (error) {
     console.error("[index] Errore tracking vocale:", error);
+  }
+});
+
+client.on("presenceUpdate", (oldPresence, newPresence) => {
+  try {
+    handlePresenceUpdate(oldPresence, newPresence);
+  } catch (error) {
+    console.error("[index] Errore tracking presence:", error);
   }
 });
 
