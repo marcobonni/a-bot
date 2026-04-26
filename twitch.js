@@ -11,6 +11,7 @@ const {
 
 const TWITCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 const AGERS_ROLE_NAME = "Agers";
+const TWITCH_TARGET_GAME_NAME = "Age of Empires IV";
 const logger = createLogger("twitch");
 
 let twitchAccessToken = null;
@@ -273,6 +274,11 @@ function buildTwitchLiveMessage(stream, roleMention = "") {
   return `${prefix}**${stream.user_name} e live!**\nhttps://twitch.tv/${stream.user_login}`;
 }
 
+function isTargetTwitchGame(stream) {
+  return String(stream?.game_name || "").trim().toLowerCase() ===
+    TWITCH_TARGET_GAME_NAME.toLowerCase();
+}
+
 async function notifyDiscordLive(client, subscription, stream) {
   const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
   const roleMention = await getAgersRoleMention(channel);
@@ -354,9 +360,11 @@ async function pollTwitchLives(client) {
 
     for (const subscription of subscriptions) {
       const key = String(subscription.login).toLowerCase();
-      const stream = liveStreams.find(
+      const anyLiveStream = liveStreams.find(
         (candidate) => String(candidate.user_login).toLowerCase() === key
       );
+      const isPlayingTargetGame = isTargetTwitchGame(anyLiveStream);
+      const stream = isPlayingTargetGame ? anyLiveStream : null;
       const isLive = Boolean(stream);
       const wasLive = Boolean(subscription.lastLiveMessageId);
 
@@ -378,6 +386,11 @@ async function pollTwitchLives(client) {
           displayName: stream.user_name || subscription.displayName,
           lastStreamId: stream.id || subscription.lastStreamId || null,
           lastSeenLiveAt: new Date().toISOString(),
+        });
+      } else if (anyLiveStream) {
+        logger.debug("Streamer live ma non su Age of Empires IV", {
+          streamer: key,
+          gameName: anyLiveStream.game_name || null,
         });
       }
     }
