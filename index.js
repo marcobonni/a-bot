@@ -9,15 +9,21 @@ const {
   StringSelectMenuBuilder,
 } = require("discord.js");
 const { createLogger } = require("./debug");
-const { startTwitchMonitor } = require("./twitch");
+const {
+  addTwitchSubscriptionByInput,
+  formatTwitchSubscription,
+  loadTwitchSubscriptions,
+  removeTwitchSubscriptionByInput,
+  startTwitchMonitor,
+} = require("./twitch");
 const {
   addYoutubeSubscriptionByInput,
-  ensureYoutubeStore,
   formatYoutubeSubscription,
   loadYoutubeSubscriptions,
   removeYoutubeSubscriptionByInput,
   startYoutubeMonitor,
 } = require("./youtube");
+const { ensureMonitorStore } = require("./monitorStore");
 const { startQueueChannelWebhookServer } = require("./queueChannelSync");
 const {
   ensureRankStore,
@@ -120,6 +126,38 @@ async function registerCommands() {
           .setName("list")
           .setDescription("Mostra i canali YouTube attualmente monitorati")
       ),
+
+    new SlashCommandBuilder()
+      .setName("twitch")
+      .setDescription("Gestisce i canali Twitch monitorati dal bot")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("add")
+          .setDescription("Aggiunge un canale Twitch al monitor")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link Twitch oppure login del canale")
+              .setRequired(true)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("remove")
+          .setDescription("Rimuove un canale Twitch dal monitor")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link Twitch, login o nome del canale")
+              .setRequired(true)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("list")
+          .setDescription("Mostra i canali Twitch attualmente monitorati")
+      ),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -144,7 +182,7 @@ client.once("ready", async () => {
 
   try {
     await ensureRankStore();
-    ensureYoutubeStore();
+    await ensureMonitorStore();
     logger.info("Rank store pronto");
 
     const guild = await client.guilds.fetch(GUILD_ID);
@@ -459,7 +497,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (subcommand === "list") {
-        const subscriptions = loadYoutubeSubscriptions();
+        const subscriptions = await loadYoutubeSubscriptions();
 
         if (!subscriptions.length) {
           await interaction.editReply("Nessun canale YouTube monitorato al momento.");
@@ -470,6 +508,62 @@ client.on("interactionCreate", async (interaction) => {
           [
             `Canali YouTube monitorati: **${subscriptions.length}**`,
             subscriptions.map(formatYoutubeSubscription).join("\n"),
+          ].join("\n")
+        );
+        return;
+      }
+    }
+
+    if (interaction.commandName === "twitch") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const subcommand = interaction.options.getSubcommand();
+
+      if (subcommand === "add") {
+        const input = interaction.options.getString("canale", true).trim();
+        const { subscription, alreadyExists } = await addTwitchSubscriptionByInput(input);
+
+        await interaction.editReply(
+          [
+            alreadyExists
+              ? "Canale Twitch gia monitorato. Ho aggiornato i dati salvati."
+              : "Canale Twitch aggiunto al monitor.",
+            formatTwitchSubscription(subscription),
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (subcommand === "remove") {
+        const input = interaction.options.getString("canale", true).trim();
+        const removed = await removeTwitchSubscriptionByInput(input);
+
+        if (!removed) {
+          await interaction.editReply("Non ho trovato un canale Twitch monitorato che corrisponda a quel valore.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            "Canale Twitch rimosso dal monitor.",
+            formatTwitchSubscription(removed),
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (subcommand === "list") {
+        const subscriptions = await loadTwitchSubscriptions();
+
+        if (!subscriptions.length) {
+          await interaction.editReply("Nessun canale Twitch monitorato al momento.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            `Canali Twitch monitorati: **${subscriptions.length}**`,
+            subscriptions.map(formatTwitchSubscription).join("\n"),
           ].join("\n")
         );
         return;

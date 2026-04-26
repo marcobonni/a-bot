@@ -1,10 +1,10 @@
 const { createLogger } = require("./debug");
 const {
-  ensureYoutubeStore,
+  ensureMonitorStore,
   loadYoutubeSubscriptions,
   upsertYoutubeSubscription,
   removeYoutubeSubscription,
-} = require("./youtubeStore");
+} = require("./monitorStore");
 
 const DISCORD_YOUTUBE_CHANNEL_ID = process.env.DISCORD_YOUTUBE_CHANNEL_ID;
 const YOUTUBE_POLL_INTERVAL_MS = Number(process.env.YOUTUBE_POLL_INTERVAL_MS || 5 * 60 * 1000);
@@ -228,15 +228,15 @@ function findYoutubeSubscriptionByText(subscriptions, query) {
 }
 
 async function addYoutubeSubscriptionByInput(input) {
-  ensureYoutubeStore();
+  await ensureMonitorStore();
 
   const resolved = await resolveYoutubeChannel(input);
-  const existing = loadYoutubeSubscriptions().find(
+  const existing = (await loadYoutubeSubscriptions()).find(
     (subscription) =>
       String(subscription.channelId).toLowerCase() === String(resolved.channelId).toLowerCase()
   );
 
-  const subscription = upsertYoutubeSubscription({
+  const subscription = await upsertYoutubeSubscription({
     channelId: resolved.channelId,
     title: resolved.title,
     url: resolved.url,
@@ -253,9 +253,9 @@ async function addYoutubeSubscriptionByInput(input) {
 }
 
 async function removeYoutubeSubscriptionByInput(input) {
-  ensureYoutubeStore();
+  await ensureMonitorStore();
 
-  const subscriptions = loadYoutubeSubscriptions();
+  const subscriptions = await loadYoutubeSubscriptions();
   let match = findYoutubeSubscriptionByText(subscriptions, input);
 
   if (!match) {
@@ -277,7 +277,7 @@ async function removeYoutubeSubscriptionByInput(input) {
     return null;
   }
 
-  return removeYoutubeSubscription(match.channelId);
+  return await removeYoutubeSubscription(match.channelId);
 }
 
 async function getAgersRoleMention(channel) {
@@ -361,7 +361,7 @@ async function pollYoutubeUploads(client) {
         const knownVideoId = subscription.lastVideoId || null;
 
         if (!knownVideoId) {
-          upsertYoutubeSubscription({
+          await upsertYoutubeSubscription({
             ...subscription,
             title: latestEntry.channelTitle || subscription.title,
             lastVideoId: latestEntry.videoId,
@@ -371,7 +371,7 @@ async function pollYoutubeUploads(client) {
         }
 
         if (knownVideoId === latestEntry.videoId) {
-          upsertYoutubeSubscription({
+          await upsertYoutubeSubscription({
             ...subscription,
             title: latestEntry.channelTitle || subscription.title,
             lastCheckedAt: new Date().toISOString(),
@@ -402,7 +402,7 @@ async function pollYoutubeUploads(client) {
           );
         }
 
-        upsertYoutubeSubscription({
+        await upsertYoutubeSubscription({
           ...subscription,
           title: latestEntry.channelTitle || subscription.title,
           lastVideoId: latestEntry.videoId,
@@ -422,7 +422,9 @@ async function pollYoutubeUploads(client) {
 }
 
 function startYoutubeMonitor(client) {
-  ensureYoutubeStore();
+  ensureMonitorStore().catch((error) => {
+    logger.error("Errore inizializzazione monitor store", { message: error.message });
+  });
 
   if (!DISCORD_YOUTUBE_CHANNEL_ID) {
     logger.warn("Monitor YouTube disattivato: manca DISCORD_YOUTUBE_CHANNEL_ID.");
@@ -449,7 +451,6 @@ function startYoutubeMonitor(client) {
 }
 
 module.exports = {
-  ensureYoutubeStore,
   loadYoutubeSubscriptions,
   addYoutubeSubscriptionByInput,
   removeYoutubeSubscriptionByInput,
