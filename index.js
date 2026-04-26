@@ -26,6 +26,18 @@ const {
 const { ensureMonitorStore } = require("./monitorStore");
 const { startQueueChannelWebhookServer } = require("./queueChannelSync");
 const {
+  MESSAGE_POINTS,
+  VOICE_INTERVAL_MINUTES,
+  VOICE_POINTS_PER_INTERVAL,
+  addMessagePoints,
+  endVoiceSession,
+  ensureActivityStore,
+  getLeaderboard,
+  getUserStats,
+  reconcileActiveVoiceSessions,
+  startVoiceSession,
+} = require("./activityStore");
+const {
   ensureRankStore,
   loadRankLinks,
   fetchPlayerProfile,
@@ -54,6 +66,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
@@ -94,6 +107,14 @@ async function registerCommands() {
       .setName("syncvoice")
       .setDescription("Aggiorna i ruoli AoE4 degli utenti attualmente in vocale")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+    new SlashCommandBuilder()
+      .setName("mystats")
+      .setDescription("Mostra i tuoi punti attivita"),
+
+    new SlashCommandBuilder()
+      .setName("leaderboard")
+      .setDescription("Mostra la classifica punti del server"),
 
     new SlashCommandBuilder()
       .setName("youtube")
@@ -169,6 +190,27 @@ async function registerCommands() {
   logger.info("Comandi slash registrati con successo");
 }
 
+function isTrackableVoiceChannel(channel, guild) {
+  if (!channel) {
+    return false;
+  }
+
+  if (guild?.afkChannelId && channel.id === guild.afkChannelId) {
+    return false;
+  }
+
+  return true;
+}
+
+function formatPointsSummary(stats, userLabel) {
+  return [
+    `Punti di **${userLabel}**: **${stats.points.toFixed(1)}**`,
+    `Messaggi conteggiati: **${stats.messageCount}** (${MESSAGE_POINTS} punti ciascuno)`,
+    `Tempo in vocale conteggiato: **${stats.voiceMinutes} minuti**`,
+    `Regola vocale: **${VOICE_POINTS_PER_INTERVAL}** punto/i ogni **${VOICE_INTERVAL_MINUTES}** minuti`,
+  ].join("\n");
+}
+
 client.once("ready", async () => {
   logger.info("Bot online", {
     tag: client.user.tag,
@@ -183,6 +225,7 @@ client.once("ready", async () => {
   try {
     await ensureRankStore();
     await ensureMonitorStore();
+    await ensureActivityStore();
     logger.info("Rank store pronto");
 
     const guild = await client.guilds.fetch(GUILD_ID);
@@ -193,6 +236,19 @@ client.once("ready", async () => {
       name: fullGuild.name,
       memberCount: fullGuild.memberCount,
     });
+
+    await fullGuild.members.fetch();
+    const activeVoiceEntries = [];
+    for (const member of fullGuild.members.cache.values()) {
+      if (isTrackableVoiceChannel(member.voice?.channel, fullGuild)) {
+        activeVoiceEntries.push({
+          userId: member.id,
+          channelId: member.voice.channel.id,
+        });
+      }
+    }
+
+    await reconcileActiveVoiceSessions(activeVoiceEntries);
 
     const result = await syncOnlyVoiceUsers(client, fullGuild);
     logger.info("Sync iniziale completato", result);
@@ -217,6 +273,51 @@ client.once("ready", async () => {
     startQueueChannelWebhookServer(client);
   } catch (error) {
     console.error("[index] Errore nel bootstrap del bot:", error);
+  }
+});
+
+client.on("messageCreate", async (message) => {
+  try {
+    if (!message.guild || message.guild.id !== GUILD_ID) {
+      return;
+    }
+
+    if (message.author?.bot || message.system) {
+      return;
+    }
+
+    await addMessagePoints(message.author.id);
+  } catch (error) {
+    console.error("[index] Errore tracking messaggi:", error);
+  }
+});
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    const guild = newState.guild || oldState.guild;
+
+    if (!guild || guild.id !== GUILD_ID) {
+      return;
+    }
+
+    const oldTrackable = isTrackableVoiceChannel(oldState.channel, guild);
+    const newTrackable = isTrackableVoiceChannel(newState.channel, guild);
+
+    if (!oldTrackable && newTrackable) {
+      await startVoiceSession(newState.id, newState.channel.id);
+      return;
+    }
+
+    if (oldTrackable && !newTrackable) {
+      await endVoiceSession(oldState.id);
+      return;
+    }
+
+    if (oldTrackable && newTrackable && oldState.channelId !== newState.channelId) {
+      await startVoiceSession(newState.id, newState.channel.id);
+    }
+  } catch (error) {
+    console.error("[index] Errore tracking vocale:", error);
   }
 });
 
@@ -454,6 +555,45 @@ client.on("interactionCreate", async (interaction) => {
           `Errori: **${result.errors}**`,
         ].join("\n")
       );
+      return;
+    }
+
+    if (interaction.commandName === "mystats") {
+      const targetUser = interaction.user;
+      const stats = getUserStats(targetUser.id);
+
+      await interaction.reply({
+        content: formatPointsSummary(stats, targetUser.username),
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "leaderboard") {
+      const ranking = getLeaderboard(10);
+
+      if (!ranking.length) {
+        await interaction.reply({
+          content: "Nessun punto registrato al momento.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const lines = await Promise.all(
+        ranking.map(async (entry, index) => {
+          const member =
+            interaction.guild.members.cache.get(entry.userId) ||
+            (await interaction.guild.members.fetch(entry.userId).catch(() => null));
+          const name = member?.displayName || `<@${entry.userId}>`;
+          return `${index + 1}. ${name} - **${entry.points.toFixed(1)}** punti`;
+        })
+      );
+
+      await interaction.reply({
+        content: ["Classifica attivita:", ...lines].join("\n"),
+        ephemeral: true,
+      });
       return;
     }
 
