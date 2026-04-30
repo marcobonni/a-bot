@@ -11,6 +11,7 @@ const {
 
 const TWITCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 const AGERS_ROLE_NAME = "Agers";
+const AGERS_PING_STREAMERS = new Set(["aoe4italia_legacy"]);
 const TWITCH_TARGET_GAME_NAME = "Age of Empires IV";
 const logger = createLogger("twitch");
 
@@ -279,9 +280,15 @@ function isTargetTwitchGame(stream) {
     TWITCH_TARGET_GAME_NAME.toLowerCase();
 }
 
+function shouldPingAgers(stream) {
+  return AGERS_PING_STREAMERS.has(String(stream?.user_login || "").toLowerCase());
+}
+
 async function notifyDiscordLive(client, subscription, stream) {
   const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
-  const roleMention = await getAgersRoleMention(channel);
+  const roleMention = shouldPingAgers(stream)
+    ? await getAgersRoleMention(channel)
+    : "";
 
   logger.info("Invio messaggio live", {
     streamer: stream.user_login,
