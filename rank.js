@@ -547,7 +547,6 @@ function getVoiceMemberIds(guild) {
 
 async function syncOnlyVoiceUsers(client, guild) {
   await guild.channels.fetch();
-  await guild.members.fetch();
 
   const links = await loadRankLinks();
   const voiceMemberIds = getVoiceMemberIds(guild);
