@@ -1,3 +1,18 @@
+const process = require("node:process");
+
+// Su Node 20+/22 possiamo caricare `.env` senza dipendenze esterne.
+if (typeof process.loadEnvFile === "function") {
+  process.loadEnvFile();
+}
+
+process.on("uncaughtException", (error) => {
+  console.error("[bootstrap] uncaughtException:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[bootstrap] unhandledRejection:", reason);
+});
+
 const {
   ActionRowBuilder,
   Client,
@@ -66,6 +81,14 @@ const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SEARCH_MENU_PREFIX = "select_player:";
 const logger = createLogger("index");
 
+logger.info("Bootstrap avviato", {
+  hasToken: Boolean(process.env.DISCORD_BOT_TOKEN),
+  hasClientId: Boolean(process.env.DISCORD_CLIENT_ID),
+  hasGuildId: Boolean(process.env.DISCORD_GUILD_ID),
+  hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
+  hasSupabaseKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+});
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -75,6 +98,40 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
+
+function isIgnorableInteractionError(error) {
+  return error?.code === 10062 || error?.code === 40060;
+}
+
+async function safelyRespondToInteractionError(interaction, message) {
+  if (!interaction?.isRepliable?.()) {
+    return;
+  }
+
+  try {
+    if (interaction.deferred) {
+      await interaction.editReply(message);
+      return;
+    }
+
+    if (interaction.replied) {
+      await interaction.followUp({ content: message, flags: 64 });
+      return;
+    }
+
+    await interaction.reply({ content: message, flags: 64 });
+  } catch (responseError) {
+    if (isIgnorableInteractionError(responseError)) {
+      logger.warn("Risposta interaction ignorata", {
+        code: responseError.code,
+        responseMessage: responseError.message,
+      });
+      return;
+    }
+
+    throw responseError;
+  }
+}
 
 async function registerCommands() {
   logger.info("Registrazione comandi slash...");
@@ -307,6 +364,13 @@ client.once("ready", async () => {
   } catch (error) {
     console.error("[index] Errore nel bootstrap del bot:", error);
   }
+});
+
+client.on("error", (error) => {
+  logger.error("Errore client Discord", {
+    message: error.message,
+    stack: error.stack,
+  });
 });
 
 client.on("messageCreate", async (message) => {
@@ -766,15 +830,16 @@ client.on("interactionCreate", async (interaction) => {
 
     const message = `Errore: ${error.message}`;
 
-    if (interaction.isRepliable()) {
-      if (interaction.deferred) {
-        await interaction.editReply(message);
-      } else if (interaction.replied) {
-        await interaction.followUp({ content: message, ephemeral: true });
-      } else {
-        await interaction.reply({ content: message, ephemeral: true });
-      }
+    if (isIgnorableInteractionError(error)) {
+      logger.warn("Interaction gia gestita o scaduta", {
+        code: error.code,
+        commandName: interaction.commandName || null,
+        userId: interaction.user?.id || null,
+      });
+      return;
     }
+
+    await safelyRespondToInteractionError(interaction, message);
   }
 });
 
