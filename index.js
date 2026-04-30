@@ -1,8 +1,11 @@
 const process = require("node:process");
+const fs = require("node:fs");
+const path = require("node:path");
 
 // Su Node 20+/22 possiamo caricare `.env` senza dipendenze esterne.
-if (typeof process.loadEnvFile === "function") {
-  process.loadEnvFile();
+const envFilePath = path.join(__dirname, ".env");
+if (typeof process.loadEnvFile === "function" && fs.existsSync(envFilePath)) {
+  process.loadEnvFile(envFilePath);
 }
 
 process.on("uncaughtException", (error) => {
