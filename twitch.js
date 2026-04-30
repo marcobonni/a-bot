@@ -11,7 +11,6 @@ const {
 
 const TWITCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 const AGERS_ROLE_NAME = "Agers";
-const AGERS_PING_STREAMERS = new Set(["aoe4italia_legacy"]);
 const TWITCH_TARGET_GAME_NAME = "Age of Empires IV";
 const logger = createLogger("twitch");
 
@@ -163,7 +162,8 @@ async function resolveTwitchChannel(input) {
 }
 
 function formatTwitchSubscription(subscription) {
-  return `- **${subscription.displayName || subscription.login}** - ${subscription.url} - login \`${subscription.login}\``;
+  const pingLabel = subscription.pingAgers ? " - ping Agers attivo" : "";
+  return `- **${subscription.displayName || subscription.login}** - ${subscription.url} - login \`${subscription.login}\`${pingLabel}`;
 }
 
 function findTwitchSubscriptionByText(subscriptions, query) {
@@ -208,6 +208,7 @@ async function addTwitchSubscriptionByInput(input) {
     login: resolved.login,
     displayName: resolved.displayName,
     url: resolved.url,
+    pingAgers: existing?.pingAgers || false,
     addedAt: existing?.addedAt || new Date().toISOString(),
     lastStreamId: existing?.lastStreamId || null,
     lastLiveMessageId: existing?.lastLiveMessageId || null,
@@ -247,6 +248,29 @@ async function removeTwitchSubscriptionByInput(input) {
   return await removeTwitchSubscription(match.login);
 }
 
+async function setTwitchPingAgersByInput(input, pingAgers) {
+  await ensureMonitorStore();
+
+  const subscriptions = await loadTwitchSubscriptions();
+  let match = findTwitchSubscriptionByText(subscriptions, input);
+
+  if (!match) {
+    const resolved = await resolveTwitchChannel(input);
+    match = subscriptions.find(
+      (subscription) => String(subscription.login).toLowerCase() === resolved.login
+    );
+  }
+
+  if (!match) {
+    return null;
+  }
+
+  return await upsertTwitchSubscription({
+    ...match,
+    pingAgers: Boolean(pingAgers),
+  });
+}
+
 async function getAgersRoleMention(channel) {
   const guild = channel.guild;
 
@@ -281,12 +305,12 @@ function isTargetTwitchGame(stream) {
 }
 
 function shouldPingAgers(stream) {
-  return AGERS_PING_STREAMERS.has(String(stream?.user_login || "").toLowerCase());
+  return Boolean(stream);
 }
 
 async function notifyDiscordLive(client, subscription, stream) {
   const channel = await client.channels.fetch(DISCORD_LIVE_CHANNEL_ID);
-  const roleMention = shouldPingAgers(stream)
+  const roleMention = subscription?.pingAgers && shouldPingAgers(stream)
     ? await getAgersRoleMention(channel)
     : "";
 
@@ -443,5 +467,6 @@ module.exports = {
   loadTwitchSubscriptions,
   addTwitchSubscriptionByInput,
   removeTwitchSubscriptionByInput,
+  setTwitchPingAgersByInput,
   formatTwitchSubscription,
 };

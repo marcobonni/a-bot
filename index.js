@@ -1,5 +1,6 @@
 const process = require("node:process");
 const fs = require("node:fs");
+const http = require("node:http");
 const path = require("node:path");
 
 // Su Node 20+/22 possiamo caricare `.env` senza dipendenze esterne.
@@ -32,6 +33,7 @@ const {
   formatTwitchSubscription,
   loadTwitchSubscriptions,
   removeTwitchSubscriptionByInput,
+  setTwitchPingAgersByInput,
   startTwitchMonitor,
 } = require("./twitch");
 const {
@@ -39,6 +41,7 @@ const {
   formatYoutubeSubscription,
   loadYoutubeSubscriptions,
   removeYoutubeSubscriptionByInput,
+  setYoutubePingAgersByInput,
   startYoutubeMonitor,
 } = require("./youtube");
 const { ensureMonitorStore } = require("./monitorStore");
@@ -65,6 +68,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SEARCH_MENU_PREFIX = "select_player:";
+const PORT = Number(process.env.PORT || 3000);
 const logger = createLogger("index");
 
 logger.info("Bootstrap avviato", {
@@ -73,6 +77,22 @@ logger.info("Bootstrap avviato", {
   hasGuildId: Boolean(process.env.DISCORD_GUILD_ID),
   hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
   hasSupabaseKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+  port: PORT,
+});
+
+const healthServer = http.createServer((req, res) => {
+  if (req.method === "GET" || req.method === "HEAD") {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("ok");
+    return;
+  }
+
+  res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("method not allowed");
+});
+
+healthServer.listen(PORT, () => {
+  logger.info("Health server in ascolto", { port: PORT });
 });
 
 const client = new Client({
@@ -184,6 +204,23 @@ async function registerCommands() {
         subcommand
           .setName("list")
           .setDescription("Mostra i canali YouTube attualmente monitorati")
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("ping")
+          .setDescription("Attiva o disattiva il tag Agers per un canale YouTube")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link, handle, channel ID o nome del canale")
+              .setRequired(true)
+          )
+          .addBooleanOption((option) =>
+            option
+              .setName("attivo")
+              .setDescription("Se attivo, i nuovi video taggano Agers")
+              .setRequired(true)
+          )
       ),
 
     new SlashCommandBuilder()
@@ -216,6 +253,23 @@ async function registerCommands() {
         subcommand
           .setName("list")
           .setDescription("Mostra i canali Twitch attualmente monitorati")
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("ping")
+          .setDescription("Attiva o disattiva il tag Agers per un canale Twitch")
+          .addStringOption((option) =>
+            option
+              .setName("canale")
+              .setDescription("Link Twitch, login o nome del canale")
+              .setRequired(true)
+          )
+          .addBooleanOption((option) =>
+            option
+              .setName("attivo")
+              .setDescription("Se attivo, la live tagga Agers")
+              .setRequired(true)
+          )
       ),
   ].map((command) => command.toJSON());
 
@@ -586,6 +640,27 @@ client.on("interactionCreate", async (interaction) => {
         );
         return;
       }
+
+      if (subcommand === "ping") {
+        const input = interaction.options.getString("canale", true).trim();
+        const active = interaction.options.getBoolean("attivo", true);
+        const updated = await setYoutubePingAgersByInput(input, active);
+
+        if (!updated) {
+          await interaction.editReply("Non ho trovato un canale YouTube monitorato che corrisponda a quel valore.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            active
+              ? "Tag Agers attivato per il canale YouTube."
+              : "Tag Agers disattivato per il canale YouTube.",
+            formatYoutubeSubscription(updated),
+          ].join("\n")
+        );
+        return;
+      }
     }
 
     if (interaction.commandName === "twitch") {
@@ -638,6 +713,27 @@ client.on("interactionCreate", async (interaction) => {
           [
             `Canali Twitch monitorati: **${subscriptions.length}**`,
             subscriptions.map(formatTwitchSubscription).join("\n"),
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (subcommand === "ping") {
+        const input = interaction.options.getString("canale", true).trim();
+        const active = interaction.options.getBoolean("attivo", true);
+        const updated = await setTwitchPingAgersByInput(input, active);
+
+        if (!updated) {
+          await interaction.editReply("Non ho trovato un canale Twitch monitorato che corrisponda a quel valore.");
+          return;
+        }
+
+        await interaction.editReply(
+          [
+            active
+              ? "Tag Agers attivato per il canale Twitch."
+              : "Tag Agers disattivato per il canale Twitch.",
+            formatTwitchSubscription(updated),
           ].join("\n")
         );
         return;

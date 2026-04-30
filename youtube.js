@@ -190,7 +190,8 @@ async function resolveYoutubeChannel(input) {
 }
 
 function formatYoutubeSubscription(subscription) {
-  return `- **${subscription.title}** - ${subscription.url} - ID \`${subscription.channelId}\``;
+  const pingLabel = subscription.pingAgers ? " - ping Agers attivo" : "";
+  return `- **${subscription.title}** - ${subscription.url} - ID \`${subscription.channelId}\`${pingLabel}`;
 }
 
 function findYoutubeSubscriptionByText(subscriptions, query) {
@@ -242,6 +243,7 @@ async function addYoutubeSubscriptionByInput(input) {
     url: resolved.url,
     input: String(input).trim(),
     lastVideoId: existing?.lastVideoId || resolved.latestVideoId || null,
+    pingAgers: existing?.pingAgers || false,
     addedAt: existing?.addedAt || new Date().toISOString(),
     lastCheckedAt: new Date().toISOString(),
   });
@@ -280,6 +282,30 @@ async function removeYoutubeSubscriptionByInput(input) {
   return await removeYoutubeSubscription(match.channelId);
 }
 
+async function setYoutubePingAgersByInput(input, pingAgers) {
+  await ensureMonitorStore();
+
+  const subscriptions = await loadYoutubeSubscriptions();
+  let match = findYoutubeSubscriptionByText(subscriptions, input);
+
+  if (!match) {
+    const resolved = await resolveYoutubeChannel(input);
+    match = subscriptions.find(
+      (subscription) =>
+        String(subscription.channelId).toLowerCase() === String(resolved.channelId).toLowerCase()
+    );
+  }
+
+  if (!match) {
+    return null;
+  }
+
+  return await upsertYoutubeSubscription({
+    ...match,
+    pingAgers: Boolean(pingAgers),
+  });
+}
+
 async function getAgersRoleMention(channel) {
   const guild = channel.guild;
 
@@ -308,9 +334,15 @@ function buildYoutubeNotification(subscription, video, roleMention = "") {
   return `${prefix}**${subscription.title} ha pubblicato un nuovo video!**\n${video.url}`;
 }
 
+function shouldPingAgers(subscription) {
+  return Boolean(subscription?.pingAgers);
+}
+
 async function notifyDiscordYoutubeVideo(client, subscription, video) {
   const channel = await client.channels.fetch(DISCORD_YOUTUBE_CHANNEL_ID);
-  const roleMention = await getAgersRoleMention(channel);
+  const roleMention = shouldPingAgers(subscription)
+    ? await getAgersRoleMention(channel)
+    : "";
 
   logger.info("Invio messaggio YouTube", {
     channelId: subscription.channelId,
@@ -334,7 +366,7 @@ async function pollYoutubeUploads(client) {
   pollInFlight = true;
 
   try {
-    const subscriptions = loadYoutubeSubscriptions();
+    const subscriptions = await loadYoutubeSubscriptions();
 
     if (!subscriptions.length) {
       logger.debug("Nessun canale YouTube configurato");
@@ -454,6 +486,7 @@ module.exports = {
   loadYoutubeSubscriptions,
   addYoutubeSubscriptionByInput,
   removeYoutubeSubscriptionByInput,
+  setYoutubePingAgersByInput,
   formatYoutubeSubscription,
   startYoutubeMonitor,
 };
