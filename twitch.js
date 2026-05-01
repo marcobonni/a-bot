@@ -296,7 +296,8 @@ async function getAgersRoleMention(channel) {
 
 function buildTwitchLiveMessage(stream, roleMention = "") {
   const prefix = roleMention ? `${roleMention}\n` : "";
-  return `${prefix}**${stream.user_name} e live!**\nhttps://twitch.tv/${stream.user_login}`;
+  const gameLine = stream.game_name ? `Gioco: **${stream.game_name}**\n` : "";
+  return `${prefix}**${stream.user_name} è live!**\n${gameLine}https://twitch.tv/${stream.user_login}`;
 }
 
 function isTargetTwitchGame(stream) {

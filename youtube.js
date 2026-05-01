@@ -331,7 +331,8 @@ async function getAgersRoleMention(channel) {
 
 function buildYoutubeNotification(subscription, video, roleMention = "") {
   const prefix = roleMention ? `${roleMention}\n` : "";
-  return `${prefix}**${subscription.title} ha pubblicato un nuovo video!**\n${video.url}`;
+  const titleLine = video.title ? `Titolo: **${video.title}**\n` : "";
+  return `${prefix}**${subscription.title} ha pubblicato un nuovo video!**\n${titleLine}${video.url}`;
 }
 
 function shouldPingAgers(subscription) {
