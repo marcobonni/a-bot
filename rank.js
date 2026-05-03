@@ -328,7 +328,7 @@ async function sendRankUpMessage(client, guild, userId, type, oldRank, newRank) 
   const rankEmoji = await getRankEmoji(guild, type, newRank);
   const imageUrl = getRankImage(newRank);
 
-  const content = `Congratulazione a ${member} per aver raggiunto il rank di ${rankEmoji} ${rankLabel} in ${modeLabel}!`;
+  const content = `GG ${member}! Nuovo traguardo sbloccato: ${rankEmoji} **${rankLabel}** in ${modeLabel}.`;
 
   const messagePayload = {
     content,
