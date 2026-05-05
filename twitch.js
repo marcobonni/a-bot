@@ -295,9 +295,21 @@ async function getAgersRoleMention(channel) {
 }
 
 function buildTwitchLiveMessage(stream, roleMention = "") {
-  const prefix = roleMention ? `${roleMention}\n` : "";
-  const gameLine = stream.game_name ? `Gioco: **${stream.game_name}**\n` : "";
-  return `${prefix}**${stream.user_name} è live!**\n${gameLine}https://twitch.tv/${stream.user_login}`;
+  const lines = [];
+
+  if (roleMention) {
+    lines.push(roleMention);
+  }
+
+  lines.push(`**Si va live con ${stream.user_name}!**`);
+
+  if (stream.title) {
+    lines.push(`Titolo live: **${stream.title}**`);
+  }
+
+  lines.push(`Entrate qui: https://twitch.tv/${stream.user_login}`);
+
+  return lines.join("\n");
 }
 
 function isTargetTwitchGame(stream) {
